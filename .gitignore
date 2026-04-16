@@ -6,7 +6,15 @@ data/processed/
 __pycache__/
 *.pyc
 .venv/
-.python-version
+*.egg-info/
+.ruff_cache/
+.pytest_cache/
 
 # macOS
 .DS_Store
+
+# wandb
+wandb/
+
+# Claude Code local settings
+.claude/settings.local.json

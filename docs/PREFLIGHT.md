@@ -63,25 +63,18 @@ git rev-parse HEAD
 
 This is the load-bearing check. If it fails, the whole plan is wrong.
 
-**What to do:** VIPTankz's fork exposes a Python scripting API (see their `Wii-RL` README for the exact invocation — it differs from mainline Dolphin). Try running the minimal test script below, adapted if their API names have drifted.
+**What to do:** VIPTankz's fork exposes a Python scripting API with the import pattern `from dolphin import event, gui, savestate, memory, controller` (verified against their `DolphinScript.py` at the pinned SHA — see [SETUP.md](../SETUP.md)). Run the minimal test script below.
 
 Save this as `~/code/mkw/scripting_test.py`:
 
 ```python
 """Minimal scripting-API probe. Prints one RAM byte and exits.
 
-If VIPTankz's API names differ, adjust imports per their README. The
-essential check is: can Python code read a single RAM byte from a
-running MKWii session and exit cleanly?
+Verified against VIPTankz/Wii-RL @ d8358cb... — if the fork's API has
+drifted by the time you run this, adapt per their README.
 """
 
-# The exact import path is fork-specific. Common names:
-#   from dolphin import memory, event
-# or
-#   import py_dolphin_tools as pdt
-# Check third_party/Wii-RL/README.md or their wiki.
-
-from dolphin import memory, event  # adjust per fork README
+from dolphin import memory, event
 
 def main():
     # Wait until the game has fully booted past the title screen.
