@@ -1,0 +1,12 @@
+# Data artifacts — regeneratable from .dtm + savestates
+data/raw/frames/
+data/processed/
+
+# Python / uv
+__pycache__/
+*.pyc
+.venv/
+.python-version
+
+# macOS
+.DS_Store
