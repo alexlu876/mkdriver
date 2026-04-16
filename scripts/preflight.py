@@ -175,7 +175,9 @@ def print_summary(results: list[CheckResult]) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--dolphin", help="path to the VIPTankz dolphin-emu binary (optional)")
     parser.add_argument(
         "--frames-dir",
