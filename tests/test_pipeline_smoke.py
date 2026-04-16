@@ -105,12 +105,16 @@ class TestLoadFrame:
 
 
 class TestMinimalPairing:
+    # Smoke tests exercise the end-to-end pipeline on tiny synthetic demos.
+    # We pass tail_margin=0 explicitly because the hardened default of 10
+    # would trim our 20-frame synthetic demos to nothing useful.
+
     def test_pairs_equal_length(self, tmp_path: Path) -> None:
         dtm = tmp_path / "d.dtm"
         frames = tmp_path / "f"
         _write_synthetic_dtm(dtm, 20)
         _write_synthetic_frames(frames, 20)
-        pairs = pair_dtm_and_frames(dtm, frames)
+        pairs = pair_dtm_and_frames(dtm, frames, tail_margin=0)
         assert len(pairs) == 20
         assert [p.frame_idx for p in pairs] == list(range(20))
         assert [p.input_frame_idx for p in pairs] == list(range(20))
@@ -120,7 +124,7 @@ class TestMinimalPairing:
         frames = tmp_path / "f"
         _write_synthetic_dtm(dtm, 25)
         _write_synthetic_frames(frames, 20)
-        pairs = pair_dtm_and_frames(dtm, frames)
+        pairs = pair_dtm_and_frames(dtm, frames, tail_margin=0)
         assert len(pairs) == 20
 
     def test_skip_first_n_applied(self, tmp_path: Path) -> None:
@@ -128,7 +132,7 @@ class TestMinimalPairing:
         frames = tmp_path / "f"
         _write_synthetic_dtm(dtm, 30)
         _write_synthetic_frames(frames, 30)
-        pairs = pair_dtm_and_frames(dtm, frames, skip_first_n=5)
+        pairs = pair_dtm_and_frames(dtm, frames, skip_first_n=5, tail_margin=0)
         assert len(pairs) == 25
         assert pairs[0].input_frame_idx == 5
         assert pairs[0].frame_idx == 0
@@ -145,7 +149,7 @@ class TestVisualizer:
         frames = tmp_path / "f"
         _write_synthetic_dtm(dtm, 5)
         _write_synthetic_frames(frames, 5)
-        pairs = pair_dtm_and_frames(dtm, frames)
+        pairs = pair_dtm_and_frames(dtm, frames, tail_margin=0)
         out = render_overlay(pairs[0])
         assert out.mode == "RGB"
         assert out.size == (320, 240)
@@ -155,7 +159,7 @@ class TestVisualizer:
         frames = tmp_path / "f"
         _write_synthetic_dtm(dtm, 60)  # 1 second at 60 fps
         _write_synthetic_frames(frames, 60)
-        pairs = pair_dtm_and_frames(dtm, frames)
+        pairs = pair_dtm_and_frames(dtm, frames, tail_margin=0)
         out = tmp_path / "overlay.mp4"
         # Small fps keeps encoding fast in CI.
         result = write_overlay_video(pairs, out, fps=30, n_seconds=None)
