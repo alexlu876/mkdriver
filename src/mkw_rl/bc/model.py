@@ -26,7 +26,6 @@ half-destroyed by the 4-channel first-conv reinit anyway.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
 
 import torch
 import torch.nn as nn
@@ -34,7 +33,7 @@ import torch.nn.functional as F
 
 from mkw_rl.dtm.action_encoding import N_STEERING_BINS
 
-LstmState: TypeAlias = tuple[torch.Tensor, torch.Tensor]  # (h, c)
+type LstmState = tuple[torch.Tensor, torch.Tensor]  # (h, c)
 
 
 # ---------------------------------------------------------------------------
