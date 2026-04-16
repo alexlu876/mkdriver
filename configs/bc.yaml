@@ -1,0 +1,31 @@
+# BC training config for Luigi Circuit bring-up. See src/mkw_rl/bc/train.py:TrainConfig.
+
+data:
+  demo_glob: "data/processed/user_demos/*.pkl"
+  train_val_split: 0.9
+  batch_size: 16
+  num_workers: 0           # bump once pipeline is proven stable
+  stack_size: 4
+  seq_len: 32
+  frame_skip: 4
+
+optim:
+  # Scientific notation must have an explicit decimal in YAML 1.1 (PyYAML)
+  # to parse as float. Stick to decimal or explicit-form scientific.
+  lr: 0.0003
+  weight_decay: 0.00001
+  epochs: 50
+  grad_clip: 1.0
+
+loss:
+  steering_weight: 1.0
+  button_weight: 1.0
+
+logging:
+  wandb_project: mkw-rl
+  log_dir: runs/bc
+  checkpoint_every: 5
+
+runtime:
+  device: cpu             # override to 'mps' on macOS or 'cuda' elsewhere
+  seed: 0
