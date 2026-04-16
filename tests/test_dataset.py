@@ -199,12 +199,8 @@ class TestSampler:
 
     def _assert_within_demo_ordered(self, ds: MkwBCDataset, demo_order: list[str]) -> None:
         # This tests a weaker property: for each demo, we see exactly its
-        # chunks in order.
-        from collections import defaultdict
-
-        seen_positions = defaultdict(int)
-        # We don't have direct access to seq_starts here; rely on order of
-        # first/last appearances of each demo instead.
+        # chunks in order — appearances of each demo should form a
+        # contiguous run (no interleaving within a single stream).
         first: dict[str, int] = {}
         last: dict[str, int] = {}
         for i, did in enumerate(demo_order):

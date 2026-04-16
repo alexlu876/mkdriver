@@ -43,6 +43,7 @@ select = ["E", "F", "W", "I", "B", "UP", "N"]
 ignore = [
     "E501",
     "N812",
+    "N806",  # B, T, H, W are conventional ML variable names (batch, time, height, width)
 ]
 
 [tool.ruff.format]
