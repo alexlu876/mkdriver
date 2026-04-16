@@ -83,6 +83,16 @@ class TestFrameDumpLoader:
         dump = load_frame_dump(tmp_path)
         assert [p.name for p in dump.frame_paths] == names
 
+    def test_recursive_finds_game_id_subdir(self, tmp_path: Path) -> None:
+        """Dolphin writes to Dump/Frames/<GAMEID>/, so rglob is required."""
+        subdir = tmp_path / "RMCE01"
+        subdir.mkdir()
+        for i in range(3):
+            Image.new("RGB", (4, 4)).save(subdir / f"framedump_{i}.png")
+        dump = load_frame_dump(tmp_path)
+        assert len(dump.frame_paths) == 3
+        assert all(p.parent.name == "RMCE01" for p in dump.frame_paths)
+
 
 class TestLoadFrame:
     def test_grayscale_shape(self, tmp_path: Path) -> None:

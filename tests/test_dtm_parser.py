@@ -148,6 +148,33 @@ class TestHeaderParsing:
         with pytest.raises(DtmFormatError, match="GCN port 1"):
             parse_dtm(p)
 
+    def test_reject_multi_gcn(self, tmp_path: Path) -> None:
+        # 0x03 = GCN port 1 + port 2. Must reject; we only handle single GCN.
+        blob = _minimal_valid_blob(controllers=0x03)
+        p = tmp_path / "m.dtm"
+        p.write_bytes(blob)
+        with pytest.raises(DtmFormatError, match="other than GCN port 1"):
+            parse_dtm(p)
+
+    def test_reject_gcn_plus_wiimote(self, tmp_path: Path) -> None:
+        # 0x11 = GCN port 1 + Wiimote 1. Must reject.
+        blob = _minimal_valid_blob(controllers=0x11)
+        p = tmp_path / "gw.dtm"
+        p.write_bytes(blob)
+        with pytest.raises(DtmFormatError, match="other than GCN port 1"):
+            parse_dtm(p)
+
+    def test_header_input_count_mismatch_warns(self, tmp_path: Path, caplog) -> None:
+        # Claim 100 frames in header but only write 10.
+        frames = [build_frame() for _ in range(10)]
+        blob = build_dtm_blob(input_count=100, vi_count=100, frames=frames)
+        p = tmp_path / "mm.dtm"
+        p.write_bytes(blob)
+        with caplog.at_level("WARNING", logger="mkw_rl.dtm.parser"):
+            _, states = parse_dtm(p)
+        assert len(states) == 10
+        assert any("input_count=100" in r.message for r in caplog.records)
+
     def test_body_not_multiple_of_frame_size(self, tmp_path: Path) -> None:
         blob = _minimal_valid_blob()
         # Append 3 trailing bytes (not a full frame).

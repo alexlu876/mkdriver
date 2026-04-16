@@ -54,6 +54,10 @@ def load_frame_dump(frame_dir: Path | str) -> FrameDump:
     Does not load pixel data — use ``load_frame`` for that. This is a
     lightweight index so downstream pipelines can decide which frames
     they actually need.
+
+    Recursive: Dolphin commonly writes frame dumps to a game-ID subdirectory
+    (e.g. ``Dump/Frames/RMCE01/framedump_0.png``), not directly in
+    ``Dump/Frames/``. We use rglob so either layout works.
     """
     frame_dir = Path(frame_dir)
     if not frame_dir.exists():
@@ -61,9 +65,9 @@ def load_frame_dump(frame_dir: Path | str) -> FrameDump:
     if not frame_dir.is_dir():
         raise NotADirectoryError(f"not a directory: {frame_dir}")
 
-    pngs = sorted(frame_dir.glob("*.png"), key=_frame_sort_key)
+    pngs = sorted(frame_dir.rglob("*.png"), key=_frame_sort_key)
     if not pngs:
-        raise FileNotFoundError(f"no PNGs in {frame_dir}")
+        raise FileNotFoundError(f"no PNGs in {frame_dir} (searched recursively)")
 
     return FrameDump(frame_dir=frame_dir, frame_paths=pngs)
 

@@ -354,16 +354,6 @@ def bc_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def build_samples_by_demo(
-    demo_pairs: list[tuple[str, list[PairedSample]]],
-) -> dict[str, list[PairedSample]]:
-    """Wrap a list of (demo_id, paired_samples) into a dict.
-
-    Thin helper so the downstream parse_demo.py script stays short.
-    """
-    return {demo_id: pairs for demo_id, pairs in demo_pairs}
-
-
 def demo_id_from_path(p: Path | str) -> str:
     """Derive a stable demo_id from a .dtm filename (stem)."""
     return Path(p).stem

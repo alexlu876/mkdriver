@@ -15,9 +15,12 @@ from_savestate. Raw bytes are preserved on each controller state for debugging.
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Header layout constants (offsets and sizes in bytes).
 HEADER_SIZE = 0x100
@@ -158,6 +161,17 @@ def _parse_header(data: bytes) -> DtmHeader:
     if not header.has_gcn_port_1:
         raise DtmFormatError(f"controllers_bitfield 0b{controllers:08b} does not have GCN port 1 enabled")
 
+    # Reject multi-controller recordings. This pipeline only supports a single
+    # GCN controller on port 1 — bits 1-3 (other GCN ports) and bits 4-7
+    # (Wiimotes) would produce variable-width input frames in the body and
+    # silently misalign our 8-bytes-per-frame reader.
+    if controllers != 0x01:
+        raise DtmFormatError(
+            f"controllers_bitfield=0x{controllers:02x} has controllers other than GCN port 1 "
+            f"enabled (other GCN ports: bits 1-3; Wiimotes: bits 4-7). This pipeline "
+            f"supports only single-GCN-port-1 .dtm."
+        )
+
     return header
 
 
@@ -223,6 +237,15 @@ def parse_dtm(path: Path | str) -> tuple[DtmHeader, list[ControllerState]]:
         _parse_controller_frame(body[i * BYTES_PER_INPUT : (i + 1) * BYTES_PER_INPUT], i)
         for i in range(full_frames)
     ]
+
+    if header.input_count != full_frames:
+        log.warning(
+            "parse_dtm: header.input_count=%d but body contains %d frames. "
+            "Trusting the body. Small discrepancies (<1%%) are normal; large ones suggest "
+            "a truncated or corrupted .dtm.",
+            header.input_count,
+            full_frames,
+        )
 
     return header, states
 

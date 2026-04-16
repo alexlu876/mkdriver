@@ -174,6 +174,112 @@ def _reset_at_boundaries(
     return h, c
 
 
+def _truncate_or_rezero(
+    model: BCPolicy,
+    hidden: LstmState,
+    new_batch_size: int,
+    device: torch.device,
+) -> LstmState:
+    """Adjust hidden state to a new batch size.
+
+    If the new batch size is smaller, slice the existing hidden state
+    (preserves continuation for positions 0..new_batch_size-1). If the
+    new batch size is larger, zero-pad the tail (no prior state for new
+    positions). Both cases are rare in normal operation; the sampler
+    keeps batches full-width.
+    """
+    h, c = hidden
+    cur = h.shape[1]
+    if cur == new_batch_size:
+        return h, c
+    if cur > new_batch_size:
+        return h[:, :new_batch_size, :].contiguous(), c[:, :new_batch_size, :].contiguous()
+    # cur < new_batch_size: zero-pad the tail.
+    extra = new_batch_size - cur
+    shape = (model.config.lstm_layers, extra, model.config.lstm_hidden)
+    pad_h = torch.zeros(shape, device=device, dtype=h.dtype)
+    pad_c = torch.zeros(shape, device=device, dtype=c.dtype)
+    return torch.cat([h, pad_h], dim=1), torch.cat([c, pad_c], dim=1)
+
+
+@dataclass
+class ValStats:
+    """Per-epoch validation diagnostics."""
+
+    n_batches: int
+    loss_total: float
+    loss_steering: float
+    loss_buttons: float
+
+
+def val_epoch(
+    model: BCPolicy,
+    loader: DataLoader,
+    config: TrainConfig,
+    device: torch.device,
+) -> ValStats:
+    """One pass over the validation loader with carried hidden state.
+
+    Mirrors train_epoch's is_continuation / demo-boundary reset logic
+    but runs under no_grad and does not compute gradients or step the
+    optimizer. Used to pick the best-val-loss checkpoint.
+    """
+    model.eval()
+
+    n_batches = 0
+    sum_total = 0.0
+    sum_steering = 0.0
+    sum_buttons = 0.0
+
+    prev_meta_by_pos: list[dict[str, Any] | None] = [None] * config.batch_size
+    hidden: LstmState | None = None
+
+    with torch.no_grad():
+        for batch in loader:
+            frames = batch["frames"].to(device, non_blocking=True)
+            targets = {k: v.to(device, non_blocking=True) for k, v in batch["actions"].items()}
+            meta = batch["meta"]
+            b_actual = frames.shape[0]
+
+            is_cont = []
+            curr_meta_by_pos: list[dict[str, Any]] = []
+            for p in range(b_actual):
+                m = {"demo_id": meta["demo_id"][p], "seq_start": meta["seq_start"][p]}
+                is_cont.append(compute_is_continuation(prev_meta_by_pos[p], m, config.seq_len))
+                curr_meta_by_pos.append(m)
+
+            if hidden is None:
+                hidden = _hidden_zero_like(model, b_actual, device)
+            else:
+                if hidden[0].shape[1] != b_actual:
+                    # Batch size changed; truncate or re-zero as appropriate.
+                    hidden = _truncate_or_rezero(model, hidden, b_actual, device)
+                hidden = _reset_at_boundaries(hidden, is_cont, model, device)
+
+            logits, new_hidden = model(frames, hidden)
+            losses = bc_loss(
+                logits,
+                targets,
+                steering_weight=config.steering_weight,
+                button_weight=config.button_weight,
+            )
+
+            hidden = _maybe_detach(new_hidden)
+            prev_meta_by_pos[:b_actual] = curr_meta_by_pos
+
+            n_batches += 1
+            sum_total += float(losses["total"].item())
+            sum_steering += float(losses["steering"].item())
+            sum_buttons += float(losses["buttons"].item())
+
+    return ValStats(
+        n_batches=n_batches,
+        loss_total=sum_total / max(n_batches, 1),
+        loss_steering=sum_steering / max(n_batches, 1),
+        loss_buttons=sum_buttons / max(n_batches, 1),
+    )
+
+
 def train_epoch(
     model: BCPolicy,
     loader: DataLoader,
@@ -218,11 +324,11 @@ def train_epoch(
         if hidden is None:
             hidden = _hidden_zero_like(model, B_actual, device)
         else:
-            # If batch_size changed (last-partial case), fall back to zero init.
+            # If batch_size changed, slice or pad (H-5 audit fix) rather than
+            # zeroing everything — preserves continuation for surviving streams.
             if hidden[0].shape[1] != B_actual:
-                hidden = _hidden_zero_like(model, B_actual, device)
-            else:
-                hidden = _reset_at_boundaries(hidden, is_cont, model, device)
+                hidden = _truncate_or_rezero(model, hidden, B_actual, device)
+            hidden = _reset_at_boundaries(hidden, is_cont, model, device)
 
         logits, new_hidden = model(frames, hidden)
         losses = bc_loss(
@@ -236,10 +342,13 @@ def train_epoch(
         losses["total"].backward()
 
         # Grab LSTM grad norm before clipping.
-        lstm_grad_norm = 0.0
+        # True concatenated-L2 norm: sqrt(sum(||g||^2)). Per the audit M-1,
+        # summing per-tensor norms over-reports by the triangle inequality.
+        sqsum = 0.0
         for p in model.lstm.parameters():
             if p.grad is not None:
-                lstm_grad_norm += float(p.grad.norm().item())
+                sqsum += float(p.grad.pow(2).sum().item())
+        lstm_grad_norm = sqsum**0.5
         lstm_grad_norms.append(lstm_grad_norm)
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)

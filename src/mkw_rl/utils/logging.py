@@ -18,11 +18,18 @@ log = logging.getLogger(__name__)
 
 
 class CsvLogger:
-    """Minimal CSV logger.
+    """Minimal CSV logger with fixed columns.
 
-    Appends one row per ``log()`` call. First call determines the column
-    order; subsequent calls must use the same keys (missing columns are
-    filled with empty strings, extra columns are appended).
+    Behavior:
+    * First ``log()`` call determines the column set. These columns are
+      written as a header and the file is kept open.
+    * Subsequent calls MUST provide the same keys. Missing keys get empty
+      strings. Extra keys trigger a ONE-TIME warning per new key and are
+      dropped — we do NOT silently extend columns mid-file because that
+      would desync header and data rows (H-3 audit fix).
+    * File is opened in append mode if the path already exists; otherwise
+      written fresh. A header row is written only when the file is new
+      (L-7 audit fix — prior-run data is not clobbered).
     """
 
     def __init__(self, path: Path | str) -> None:
@@ -31,17 +38,24 @@ class CsvLogger:
         self._columns: list[str] = []
         self._file = None
         self._writer = None
+        self._warned_extra_keys: set[str] = set()
 
     def log(self, metrics: dict[str, Any]) -> None:
         if self._file is None:
             self._columns = list(metrics.keys())
-            self._file = self.path.open("w", newline="")
+            is_new = not self.path.exists() or self.path.stat().st_size == 0
+            self._file = self.path.open("a", newline="")
             self._writer = csv.writer(self._file, delimiter="\t")
-            self._writer.writerow(self._columns)
-        # Extend columns if new keys appeared.
+            if is_new:
+                self._writer.writerow(self._columns)
+        # Warn about (and drop) unknown keys — do not extend columns mid-file.
         for k in metrics:
-            if k not in self._columns:
-                self._columns.append(k)
+            if k not in self._columns and k not in self._warned_extra_keys:
+                log.warning(
+                    "CsvLogger: ignoring unknown key %r (columns were fixed on first log() call)",
+                    k,
+                )
+                self._warned_extra_keys.add(k)
         assert self._writer is not None
         row = [metrics.get(c, "") for c in self._columns]
         self._writer.writerow(row)
@@ -55,10 +69,15 @@ class CsvLogger:
 
 
 class WandbLogger:
-    """wandb-backed logger. Initialized lazily on first ``log()``."""
+    """wandb-backed logger.
+
+    Note: wandb.init is called in __init__, so creating the logger already
+    starts a run. The ``wandb`` import is deferred until construction so
+    the CSV path never incurs the wandb import cost.
+    """
 
     def __init__(self, project: str, config: dict[str, Any] | None = None) -> None:
-        import wandb  # imported lazily so CSV path doesn't incur the import
+        import wandb  # deferred — CSV path never imports wandb
 
         self._wandb = wandb
         self._run = wandb.init(project=project, config=config or {}, reinit=True)

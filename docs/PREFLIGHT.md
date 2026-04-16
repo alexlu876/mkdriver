@@ -89,7 +89,13 @@ def main():
 main()
 ```
 
-Then, in the fork's Dolphin UI: `Scripting → Run Script → ~/code/mkw/scripting_test.py`. The game should advance one frame and the printed line should appear in the Dolphin log / console.
+Then run Dolphin with the script via CLI (this is VIPTankz's documented invocation path — see `third_party/Wii-RL/DolphinEnv.py`):
+
+```bash
+/path/to/dolphin-emu --script ~/code/mkw/scripting_test.py
+```
+
+The game should advance one frame and the printed line should appear in the Dolphin log / console. (If the fork has also added a `Scripting → Run Script` menu in the UI, that works too, but the CLI is the primary path.)
 
 **Things that can go wrong:**
 
@@ -161,6 +167,8 @@ python scripts/preflight.py
 ```
 
 **Note — speed during dumping**: frame dumping slows emulation on M4. This is expected and the reason §1.2 of the spec separates record-and-replay. Do not worry if the game feels sluggish during this check.
+
+**Important — this is a dumper verification only, not the actual demo recording workflow.** Our demo pipeline NEVER records `.dtm` and dumps frames simultaneously — dumping slows emulation below realtime, which makes recorded inputs reflect slow-speed play rather than clean-speed play. See `scripts/capture_demo.md` (record clean, no dumps) and `scripts/REPLAY_PROTOCOL.md` (replay with dumps afterwards). This P-1 step is just making sure the dumper produces PNGs at all.
 
 **Record for reporting:**
 

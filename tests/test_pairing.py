@@ -18,7 +18,7 @@ from mkw_rl.dtm.parser import build_dtm_blob, build_frame
 
 
 def _write_synthetic(
-    tmp_path: Path, n_inputs: int, n_frames: int, *, lag_count: int = 0
+    tmp_path: Path, n_inputs: int, n_frames: int, *, lag_count: int = 0, from_savestate: int = 1
 ) -> tuple[Path, Path]:
     dtm_path = tmp_path / "d.dtm"
     frame_dir = tmp_path / "f"
@@ -28,6 +28,7 @@ def _write_synthetic(
         vi_count=n_inputs + lag_count,
         input_count=n_inputs,
         lag_count=lag_count,
+        from_savestate=from_savestate,
         frames=frames,
     )
     dtm_path.write_bytes(blob)
@@ -135,6 +136,18 @@ class TestWarnings:
         with caplog.at_level(logging.WARNING, logger="mkw_rl.dtm.pairing"):
             pair_dtm_and_frames(dtm, fr, tail_margin=0)
         assert not any("lag_count" in r.message for r in caplog.records)
+
+    def test_from_savestate_false_warns(self, tmp_path: Path, caplog) -> None:
+        dtm, fr = _write_synthetic(tmp_path, 100, 100, from_savestate=0)
+        with caplog.at_level(logging.WARNING, logger="mkw_rl.dtm.pairing"):
+            pair_dtm_and_frames(dtm, fr, tail_margin=0)
+        assert any("from_savestate=False" in r.message for r in caplog.records)
+
+    def test_from_savestate_true_silent_on_flag(self, tmp_path: Path, caplog) -> None:
+        dtm, fr = _write_synthetic(tmp_path, 100, 100, from_savestate=1)
+        with caplog.at_level(logging.WARNING, logger="mkw_rl.dtm.pairing"):
+            pair_dtm_and_frames(dtm, fr, tail_margin=0)
+        assert not any("from_savestate" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

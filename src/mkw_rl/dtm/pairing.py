@@ -104,6 +104,18 @@ def pair_dtm_and_frames(
             header.lag_count,
         )
 
+    # from_savestate=False warning — alignment assumes savestate-anchored recording.
+    # TAS .dtms from the community often start from power-on and have
+    # from_savestate=False; those are NOT interchangeable with user recordings
+    # and the start-aligned pairing is inappropriate.
+    if not header.from_savestate:
+        log.warning(
+            "pair_dtm_and_frames: .dtm header has from_savestate=False. "
+            "Start-aligned pairing assumes a savestate anchor. Power-on-anchored "
+            "recordings (often TAS .dtms) may not align correctly; verify the "
+            "sanity visualizer output before training on this demo."
+        )
+
     # skip_first_n / tail_margin arithmetic. All applied symmetrically
     # so frame_idx and input_frame_idx stay in lockstep after trimming.
     n = min(n_inputs, n_frames)

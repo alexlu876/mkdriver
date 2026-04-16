@@ -24,9 +24,11 @@ from PIL import Image
 from mkw_rl.bc.model import BCPolicy, BCPolicyConfig
 from mkw_rl.bc.train import (
     TrainConfig,
+    _truncate_or_rezero,
     build_model_and_optim,
     make_dataset_and_loader,
     train_epoch,
+    val_epoch,
 )
 from mkw_rl.dtm.pairing import pair_dtm_and_frames
 from mkw_rl.dtm.parser import build_dtm_blob, build_frame
@@ -164,6 +166,62 @@ def test_hidden_reset_at_demo_boundaries(tmp_path: Path) -> None:
     assert stats.n_batches > 0
     assert np.isfinite(stats.loss_total)
     assert stats.lstm_grad_norm > 1e-4
+
+
+def test_truncate_or_rezero_shrink(tmp_path: Path) -> None:
+    """H-5 audit fix: shrinking batch preserves continuation state, not zeros it."""
+    cfg = _tiny_config()
+    device = torch.device("cpu")
+    model = BCPolicy(
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+    ).to(device)
+    # Build a deliberately non-zero hidden state.
+    h = torch.randn(1, 4, 32)
+    c = torch.randn(1, 4, 32)
+    new_h, new_c = _truncate_or_rezero(model, (h, c), 2, device)
+    assert new_h.shape == (1, 2, 32)
+    assert new_c.shape == (1, 2, 32)
+    # First 2 positions should be preserved bit-for-bit.
+    assert torch.allclose(new_h, h[:, :2, :])
+    assert torch.allclose(new_c, c[:, :2, :])
+
+
+def test_truncate_or_rezero_grow(tmp_path: Path) -> None:
+    """Growing batch preserves existing positions, zero-pads new ones."""
+    cfg = _tiny_config()
+    device = torch.device("cpu")
+    model = BCPolicy(
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+    ).to(device)
+    h = torch.randn(1, 2, 32)
+    c = torch.randn(1, 2, 32)
+    new_h, new_c = _truncate_or_rezero(model, (h, c), 4, device)
+    assert new_h.shape == (1, 4, 32)
+    assert torch.allclose(new_h[:, :2, :], h)
+    # Padded positions should be zero.
+    assert torch.all(new_h[:, 2:, :] == 0)
+    assert torch.all(new_c[:, 2:, :] == 0)
+
+
+def test_val_epoch_runs(tmp_path: Path) -> None:
+    """H-2 audit fix: val_epoch runs under no_grad and returns finite losses."""
+    samples = {
+        "a": _synth_demo(tmp_path, 100, "a", seed=0),
+    }
+    cfg = TrainConfig(**{**_tiny_config().__dict__, "batch_size": 1})
+    _, loader = make_dataset_and_loader(samples, cfg, shuffle=False)
+    device = torch.device("cpu")
+    model = BCPolicy(
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+    ).to(device)
+    v = val_epoch(model, loader, cfg, device)
+    assert v.n_batches > 0
+    assert np.isfinite(v.loss_total)
+    # Val should not update any param — capture a param before/after.
+    before = next(model.parameters()).clone()
+    val_epoch(model, loader, cfg, device)
+    after = next(model.parameters()).clone()
+    assert torch.allclose(before, after)
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])

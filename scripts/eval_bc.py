@@ -55,10 +55,36 @@ def main() -> int:
 
     device = torch.device(args.device)
 
-    # Load checkpoint.
+    # Load checkpoint. Reconstruct BCPolicyConfig from ckpt["config"] when
+    # available (M-3 audit fix) so eval matches training architecture; fall
+    # back to defaults for older checkpoints that didn't save config.
     log.info("loading checkpoint %s", args.checkpoint)
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model = BCPolicy(BCPolicyConfig(stack_size=args.stack_size))
+    model_cfg: BCPolicyConfig
+    saved_cfg = ckpt.get("config")
+    if isinstance(saved_cfg, dict) and "model_config" in saved_cfg:
+        mc = saved_cfg["model_config"]
+        try:
+            model_cfg = BCPolicyConfig(
+                stack_size=mc.get("stack_size", args.stack_size),
+                input_hw=tuple(mc.get("input_hw", (114, 140))),
+                encoder_channels=tuple(mc.get("encoder_channels", (16, 32, 32))),
+                feature_dim=mc.get("feature_dim", 256),
+                lstm_hidden=mc.get("lstm_hidden", 512),
+                lstm_layers=mc.get("lstm_layers", 1),
+                n_steering_bins=mc.get("n_steering_bins", 21),
+            )
+            log.info("restored BCPolicyConfig from checkpoint: %s", model_cfg)
+        except (TypeError, ValueError) as exc:
+            log.warning("could not restore model config from checkpoint (%s); using defaults", exc)
+            model_cfg = BCPolicyConfig(stack_size=args.stack_size)
+    else:
+        log.warning(
+            "checkpoint has no model_config — using CLI defaults. "
+            "If load_state_dict fails, the checkpoint was trained with non-default architecture."
+        )
+        model_cfg = BCPolicyConfig(stack_size=args.stack_size)
+    model = BCPolicy(model_cfg)
     model.load_state_dict(ckpt["model"])
     model.to(device).eval()
 
