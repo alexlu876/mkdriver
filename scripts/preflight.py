@@ -20,14 +20,12 @@ before `uv init` and before `uv add torch …`.
 from __future__ import annotations
 
 import argparse
-import os
 import platform
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-
 
 # Default macOS Dolphin frame-dump location.
 DEFAULT_FRAMES_DIR = Path.home() / "Library" / "Application Support" / "Dolphin" / "Dump" / "Frames"
