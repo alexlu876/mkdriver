@@ -1,5 +1,7 @@
 # Autonomous build-out: change log
 
+> **⚠️ Strategic pivot 2026-04-17**: the plan below (BC first, then multi-track, then RL) is superseded. Project skipped BC and jumped to multi-track BTR directly. See [docs/PIVOT_2026-04-17.md](docs/PIVOT_2026-04-17.md). The code produced in Phases 1-2 is preserved as future BC-augmentation scaffolding but is not on the current critical path. Region was also changed from NTSC-U to PAL on the same day — see [docs/REGION_DECISION.md](docs/REGION_DECISION.md) — and propagated across the codebase.
+
 All prompts executed autonomously in one session. Running log of decisions, deviations from spec, outstanding blockers, and things you should review before proceeding.
 
 ## TL;DR
@@ -57,7 +59,7 @@ These are things I could not do autonomously. Listed in the order they'll bite y
 
 ### 🚨 Must do before any real data work
 
-1. **Run P-1 by hand.** Build VIPTankz's Dolphin fork, boot NTSC-U MKWii, run the scripting-API probe, verify savestate determinism, enable frame dumps. See `docs/PREFLIGHT.md`. Report back:
+1. **Run P-1 by hand.** Download VIPTankz's pre-compiled Dolphin (`python3 scripts/download_dolphin.py`), boot PAL MKWii, run the scripting-API probe, verify savestate determinism, enable frame dumps. See `docs/PREFLIGHT.md`. Note: region was changed from NTSC-U to PAL on 2026-04-17 — see `docs/REGION_DECISION.md`. Report back:
    - Fork commit SHA actually built.
    - `sys.executable` path from the scripting-API test.
    - `sys.version` string.

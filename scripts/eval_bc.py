@@ -46,7 +46,7 @@ def main() -> int:
     )
     ap.add_argument("--output", type=Path, required=True, help="Output directory.")
     ap.add_argument("--seconds", type=int, default=30, help="Duration to render (-1 for full demo).")
-    ap.add_argument("--fps", type=int, default=60)
+    ap.add_argument("--fps", type=int, default=50)
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--stack-size", type=int, default=4)
     ap.add_argument("--frame-skip", type=int, default=4)
@@ -67,7 +67,7 @@ def main() -> int:
         try:
             model_cfg = BCPolicyConfig(
                 stack_size=mc.get("stack_size", args.stack_size),
-                input_hw=tuple(mc.get("input_hw", (114, 140))),
+                input_hw=tuple(mc.get("input_hw", (75, 140))),
                 encoder_channels=tuple(mc.get("encoder_channels", (16, 32, 32))),
                 feature_dim=mc.get("feature_dim", 256),
                 lstm_hidden=mc.get("lstm_hidden", 512),

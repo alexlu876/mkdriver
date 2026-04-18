@@ -2,7 +2,9 @@
 
 This document is the working spec for an RL agent that plays Mario Kart Wii via the Dolphin emulator. It is written to be consumed by Claude Code as a long-running reference. Read this entire document before making architectural decisions.
 
-**Revision note (v2)**: This spec supersedes v1. Changes from v1 are concentrated in §P-1 (pre-bootstrap sanity checks), §1.2 (record-then-replay), §1.3 (alignment from start), §1.5 (sequence-returning dataset), and §2.2 (IMPALA CNN + discretized steering + stateful LSTM with TBPTT). Rationale for each change is inline.
+> **⚠️ Strategic pivot 2026-04-17: BC path deferred.** The project is now going direct to multi-track BTR with a **track-agnostic policy**, skipping behavioral cloning. See [docs/PIVOT_2026-04-17.md](docs/PIVOT_2026-04-17.md) for rationale and implications. Phase 1 (`src/mkw_rl/dtm/`) and Phase 2 (`src/mkw_rl/bc/`) are complete and tested (124 tests green) but **dormant** — they stay as future BC-augmentation scaffolding. The new critical path is Phase 2 (renumbered from old Phase 4): fork VIPTankz's env + BTR into `src/mkw_rl/env/` and `src/mkw_rl/rl/`, train on all 32 vanilla tracks with no track-id conditioning, on Vast.ai.
+
+**Revision note (v2)**: This spec supersedes v1. Changes from v1 are concentrated in §P-1 (pre-bootstrap sanity checks), §1.2 (record-then-replay), §1.3 (alignment from start), §1.5 (sequence-returning dataset), and §2.2 (IMPALA CNN + discretized steering + stateful LSTM with TBPTT). Rationale for each change is inline. Sections on `.dtm` parsing, pairing, action encoding, and BC training are preserved for future BC augmentation work; they are not on the current critical path.
 
 ---
 
@@ -17,9 +19,9 @@ This project is a layered extension of existing work. Credit where due:
 
 Our contribution (what makes this more than a fork):
 
-1. **Behavioral cloning pretraining from TAS `.dtm` demonstrations**, which VIPTankz does not do. Hypothesis: BC init accelerates RL convergence and enables approaching TAS-quality Time Trials.
-2. **Generalization across all 32 vanilla MKWii tracks**, vs. their single-track (Luigi Circuit) result. This drives architectural choices in Phase 2 (stateful recurrence over pure frame stack).
-3. **Extension to Retro Rewind custom tracks** (Phase 5 stretch).
+1. **Track-agnostic generalization across all 32 vanilla MKWii tracks** with a single policy, no track-id conditioning. VIPTankz published only a single-track (Luigi Circuit) BTR result; multi-track generalization in MKWii RL is, as of 2026-04, unpublished. This is research territory (see `docs/PIVOT_2026-04-17.md` for the honest risk assessment).
+2. **Behavioral cloning augmentation from TAS `.dtm` demonstrations** (deferred — `src/mkw_rl/dtm/` and `src/mkw_rl/bc/` are built and tested but dormant). Hypothesis on hold: BC augmentation accelerates RL convergence and enables approaching TAS-quality Time Trials. Re-examined only after a working multi-track BTR baseline exists.
+3. **Extension to Retro Rewind custom tracks** (Phase 5 stretch — blocked on region; Retro Rewind is NTSC-U and we are PAL).
 4. **Autoresearch stretch** (Phase 6, miolini/autoresearch-macos) — attribution deferred until implementation.
 
 ---
@@ -28,17 +30,19 @@ Our contribution (what makes this more than a fork):
 
 Do not revisit these without explicit user approval.
 
-- **Game region**: NTSC-U only. Game ID `RMCE01`. Do not support PAL / NTSC-J / Korean. Retro Rewind requires NTSC-U anyway.
+- **Game region**: PAL only. Game ID `RMCP01`. Do not support NTSC-U / NTSC-J / Korean. Decision recorded in [docs/REGION_DECISION.md](docs/REGION_DECISION.md) — we follow VIPTankz's PAL setup to get their RAM addresses, savestates, and pre-trained model for free. (Trade-off: Retro Rewind is NTSC-U-only, so Phase 5 is out of scope unless we flip regions later.)
 - **Controller**: Emulated GameCube controller (GCN), via `.dtm` GameCube controller section. 8 bytes per frame. No Wii Remote / Classic Controller / Nunchuck paths.
 - **Dolphin build**: VIPTankz's scripting fork, pinned by commit SHA (not branch-tracked). Mainline Dolphin is not acceptable — we need their Python scripting API for RAM reads, screen grabs, savestate manipulation, and input injection.
 - **Python**: 3.13 on macOS, matching VIPTankz's macOS fork requirement. Target interpreter is determined in §P-1 (may be Homebrew `python@3.13` or uv-managed standalone, depending on Dolphin fork linkage). `uv` is used for dependency management and virtualenvs. Do not use `conda`, `poetry`, or raw `pip+venv`.
-- **Frame processing**: 140×114 grayscale, 4-frame stack. Matches BTR paper. Do not change these without a written reason.
+- **Frame processing**: 140×75 grayscale, 4-frame stack. Matches VIPTankz's MKWii BTR implementation (`DolphinEnv.py:91-92`, `BTR.py:1258`). Do not change without a written reason.
 - **Frameskip**: 4 (BTR convention, Atari-style).
-- **Bring-up track**: Luigi Circuit (matches VIPTankz). All 32 tracks is a Phase 3 problem. The **architecture is chosen to support multi-track from day one** (stateful LSTM, not because Luigi needs it, but so Phase 3 doesn't require an architectural rewrite).
-- **Recording discipline**: `.dtm` is always recorded with frame dumping *disabled*, then replayed with frame dumping *enabled* to produce paired frames. Never record with both at once. See §1.2.
-- **Pairing direction**: alignment from the start of the savestate anchor, with `skip_first_n` for menu/countdown frames and tail-trimming for stop-recording ragged edge. See §1.3.
-- **Policy architecture**: IMPALA-style CNN encoder (not ResNet-18) + stateful LSTM over sequences with truncated backpropagation through time. Steering output is **discretized** into 21 bins, not a continuous regression. See §2.2.
-- **Compute**: M4 Mac Mini (16GB) for dev/BC pretraining, 2× M4 Minis as distributed rollout workers for Phase 4, Vast.ai for heavy BTR training. Do not assume a local GPU.
+- **Bring-up track**: Luigi Circuit for initial smoke testing (matches VIPTankz), then all 32 vanilla tracks simultaneously with **track-agnostic policy** (no track-id input). See `docs/PIVOT_2026-04-17.md` for why we jumped to multi-track early.
+- **Recording discipline** (dormant): `.dtm` is always recorded with frame dumping *disabled*, then replayed with frame dumping *enabled* to produce paired frames. Never record with both at once. See §1.2. Applies only to the BC-augmentation future work.
+- **Pairing direction** (dormant): alignment from the start of the savestate anchor, with `skip_first_n` for menu/countdown frames and tail-trimming for stop-recording ragged edge. See §1.3. Applies only to the BC-augmentation future work.
+- **Policy architecture**:
+  - **Active path (BTR)**: IMPALA-style CNN encoder + IQN/Munchausen/PER/NoisyNet stack per VIPTankz's `BTR.py`. Frame stack only, no recurrence. Discrete 40-way action space per VIPTankz. See §4 (renumbered from previous v1 spec).
+  - **Dormant path (BC)**: same IMPALA encoder + stateful LSTM + discretized 21-bin steering + per-button binary heads. See §2.2. Shares the encoder with BTR so a future BC-to-BTR warm-start is possible.
+- **Compute**: M4 Mac Mini (16GB) for code iteration, small smoke tests (Luigi Circuit only), and local multi-env debugging. **Vast.ai (RTX 4090 class) for real training runs** — committed upfront given the track-agnostic multi-track scope. Do not assume a local GPU for anything beyond smoke tests.
 
 ---
 
@@ -68,7 +72,7 @@ mkw-rl/
 │   ├── env/                    # Phase 4: gymnasium.Env wrapping VIPTankz's fork
 │   │   ├── __init__.py
 │   │   ├── dolphin_env.py
-│   │   ├── ram.py              # RAM address tables, per-region (NTSC-U only)
+│   │   ├── ram.py              # RAM address tables, per-region (PAL only)
 │   │   ├── reward.py           # reward shaping
 │   │   └── savestates.py
 │   ├── rl/                     # Phase 4: BTR / PPO
@@ -122,7 +126,7 @@ Claude Code should generate `scripts/preflight.py` and a `docs/PREFLIGHT.md` che
 The checklist must verify, in order:
 
 1. **Fork builds on the user's M4 Mac.** User clones VIPTankz/Wii-RL, follows their README to build the Dolphin fork, and confirms `dolphin-emu --version` reports the scripting build. Record the commit SHA they built against.
-2. **Fork boots NTSC-U MKWii.** User loads their own RMCE01 ISO and reaches the title screen. Confirms game ID in Dolphin logs.
+2. **Dolphin boots PAL MKWii.** User loads their own RMCP01 ISO and reaches the title screen. Confirms game ID in Dolphin logs.
 3. **Python scripting API works.** Run a minimal script (provided in `docs/PREFLIGHT.md`) that starts Dolphin, reads one RAM address, and exits cleanly. This is the load-bearing check — if this fails, the whole plan is wrong.
 4. **Python linkage determined.** Identify which Python the scripting fork loads: embedded, Homebrew, or system. This determines whether uv-managed Pythons are usable or we must pin to `/opt/homebrew/bin/python3.13`.
 5. **Frame dump produces PNGs.** User enables `Dump Frames` + `Dump Frames as Images`, runs the game for ~10s, confirms PNGs land in `~/Library/Application Support/Dolphin/Dump/Frames/`.
@@ -171,10 +175,10 @@ Record the SHA in `SETUP.md` prominently. Do not use `git submodule update --rem
 ### 0.4 Savestate for Luigi Circuit
 
 User must manually:
-1. Boot MKWii (NTSC-U, `RMCE01`) in VIPTankz's Dolphin fork.
+1. Boot MKWii (PAL, `RMCP01`) in VIPTankz's Dolphin distribution.
 2. Select Time Trial → Luigi Circuit → Standard Kart, Mario.
 3. Save state at a **specific, reproducible frame**. The simplest reproducible anchor is: the first frame after "GO!" disappears and kart inputs apply. Find this by frame-stepping from the "3" of the countdown. Record the exact VI count (from Dolphin's frame counter) in `docs/SAVESTATE_PROTOCOL.md`.
-4. Export the state to `data/savestates/luigi_circuit_tt.sav`. Also export the exact VI count to `data/savestates/luigi_circuit_tt.json` as `{"vi_count": <N>, "track": "luigi_circuit", "game_id": "RMCE01"}`.
+4. Export the state to `data/savestates/luigi_circuit_tt.sav`. Also export the exact VI count to `data/savestates/luigi_circuit_tt.json` as `{"vi_count": <N>, "track": "luigi_circuit", "game_id": "RMCP01"}`.
 
 **Why the exact VI count matters**: savestate encodes RNG. Savestates made at slightly different frames have different RNG and will produce slightly different behavior under the same inputs. For multi-track consistency and reward reproducibility, every per-track savestate must be made at a documented, reproducible VI count.
 
@@ -195,7 +199,7 @@ Reference: [TASVideos DTM spec](https://tasvideos.org/EmulatorResources/Dolphin/
 | Offset | Size | Field | Notes |
 |---|---|---|---|
 | 0x000 | 4 | signature | must equal `b"DTM\x1a"` — validate |
-| 0x004 | 6 | game_id | must equal `b"RMCE01"` — validate, raise `DtmRegionError` on mismatch |
+| 0x004 | 6 | game_id | must equal `b"RMCP01"` — validate, raise `DtmRegionError` on mismatch |
 | 0x00A | 1 | is_wii | must be 1 for MKWii |
 | 0x00B | 1 | controllers_bitfield | bits 0-3 = GC ports 1-4, bits 4-7 = Wiimotes. Must have bit 0 set (GC port 1). |
 | 0x00C | 1 | from_savestate | flag; surface this on the returned header — TAS files often have this unset |
@@ -274,7 +278,7 @@ class ControllerState:
 
 ```python
 def parse_dtm(path: Path) -> tuple[DtmHeader, list[ControllerState]]:
-    """Parse a .dtm file. Validates NTSC-U (RMCE01). Raises on malformed input."""
+    """Parse a .dtm file. Validates PAL (RMCP01). Raises on malformed input."""
 ```
 
 `DtmHeader` must surface `from_savestate`, `vi_count`, `input_count`, `lag_count` — downstream code needs these.
@@ -318,7 +322,7 @@ class FrameDump:
     frame_paths: list[Path]  # sorted by frame index
 
 def load_frame_dump(frame_dir: Path) -> FrameDump: ...
-def load_frame(path: Path, size: tuple[int, int] = (140, 114), grayscale: bool = True) -> np.ndarray: ...
+def load_frame(path: Path, size: tuple[int, int] = (140, 75), grayscale: bool = True) -> np.ndarray: ...
 ```
 
 ### 1.4 Pairing (`src/mkw_rl/dtm/pairing.py`)
@@ -387,7 +391,7 @@ class MkwBCDataset(Dataset):
     from one demo, respecting demo boundaries (never splices across demos).
 
     Returns per __getitem__:
-        frames: torch.Tensor, shape (T, stack_size=4, H=114, W=140), grayscale, float32 in [0,1]
+        frames: torch.Tensor, shape (T, stack_size=4, H=75, W=140), grayscale, float32 in [0,1]
         action: dict of tensors with shape (T,) each:
             'steering_bin': long, ∈ [0, 20]          # 21-bin discretization
             'accelerate':  float, ∈ {0, 1}
@@ -458,7 +462,7 @@ Claude Code: generate `scripts/capture_demo.md` with the user-facing protocol fr
 **Architecture (revised from v1)**:
 
 ```
-Input: (B, T, stack_size=4, H=114, W=140), grayscale, float in [0,1]
+Input: (B, T, stack_size=4, H=75, W=140), grayscale, float in [0,1]
 
 Encoder: IMPALA-style CNN applied per-timestep
     Block 1: Conv 16 ch, 3x3, stride 1  → MaxPool 3x3 stride 2 → 2x residual blocks (16 ch)
@@ -479,7 +483,7 @@ Forward signature:
     forward(frames: (B, T, 4, H, W), hidden: (h, c)) -> (logits_dict, new_hidden)
 ```
 
-**Why IMPALA CNN, not ResNet-18**: IMPALA convs are the standard for pixel-based RL (Atari, DMLab, Procgen) at a fraction of the parameter count. ResNet-18 is 11M params; IMPALA is ~1M. On 140×114 grayscale inputs the extra depth is wasted, and ResNet's ImageNet init is half-destroyed by the 4-channel first-conv reinit anyway. IMPALA trains faster, generalizes at least as well on this scale of input, and is what Phase 4's RL code will want to drop in.
+**Why IMPALA CNN, not ResNet-18**: IMPALA convs are the standard for pixel-based RL (Atari, DMLab, Procgen) at a fraction of the parameter count. ResNet-18 is 11M params; IMPALA is ~1M. On 140×75 grayscale inputs the extra depth is wasted, and ResNet's ImageNet init is half-destroyed by the 4-channel first-conv reinit anyway. IMPALA trains faster, generalizes at least as well on this scale of input, and is what Phase 4's RL code will want to drop in.
 
 **Why stateful LSTM with TBPTT**: LSTM hidden state is the right place to carry multi-second context: track identity (for Phase 3), item inventory timing, lap phase, recent-turn history beyond what the 4-frame stack sees. Training must preserve hidden state across TBPTT windows within a demo (see §2.3), otherwise the LSTM is trained on length-`seq_len` contexts only and loses the ability to integrate over longer horizons at inference.
 
@@ -490,7 +494,7 @@ Forward signature:
 - Buttons: BCE with logits per button.
 - Total: weighted sum: `L = steering_weight * ce_steering + button_weight * mean(bce_buttons)`. Start with `steering_weight = 1.0, button_weight = 1.0`.
 
-Smoke test (Prompt 2a): forward random noise at `(B=2, T=8, 4, 114, 140)`, assert all output shapes correct, assert hidden state round-trips (second call with returned hidden gives deterministic next output).
+Smoke test (Prompt 2a): forward random noise at `(B=2, T=8, 4, 75, 140)`, assert all output shapes correct, assert hidden state round-trips (second call with returned hidden gives deterministic next output).
 
 ### 2.3 Training (`scripts/train_bc.py`, `src/mkw_rl/bc/train.py`)
 
@@ -594,21 +598,22 @@ Phase 3 converts the single-track BC model into a 32-track model. Work:
 
 Fork `third_party/Wii-RL`, adapt:
 
-- `src/mkw_rl/env/dolphin_env.py` — `gymnasium.Env` wrapping their scripting fork's Python API. Action space: 21-way discrete steering × 16-way binary button combos (or factored; decide at implementation). Observation: `(4, 114, 140)` uint8 frames.
+- `src/mkw_rl/env/dolphin_env.py` — `gymnasium.Env` wrapping their scripting fork's Python API. Action space: 21-way discrete steering × 16-way binary button combos (or factored; decide at implementation). Observation: `(4, 75, 140)` uint8 frames.
 - `src/mkw_rl/env/reward.py` — reward shaping. Start with VIPTankz's reward (progress + position), add shaping for drift usage and item pickups. Log reward components separately in wandb.
-- `src/mkw_rl/env/ram.py` — RAM addresses for NTSC-U (`RMCE01`). Lap count, checkpoint progress, kart position, speed, drift state. Cite MKWii hacking wiki sources inline.
+- `src/mkw_rl/env/ram.py` — RAM addresses for PAL (`RMCP01`). Lap count, checkpoint progress, kart position, speed, drift state. Port directly from VIPTankz's `DolphinScript.py` base pointers (`0x809BD730`, `0x809C18F8`, `0x809C3618`) — they're PAL and plug in unchanged.
 - `src/mkw_rl/rl/btr.py` / `ppo.py` — BC init bridge. Because BC output is **already discrete** (§1.7), it is directly usable to init a DQN Q-head (distillation) or a PPO policy head (treat as soft target). This is cleaner than v1's framing. Algo choice (BTR vs PPO) made at the Phase 2 → Phase 3/4 checkpoint.
 
 ---
 
 ## Phase 5 — Retro Rewind custom tracks (appendix stub)
 
-Layer Retro Rewind (NTSC-U) onto the Phase 4 setup. Likely work:
+**⚠️ Retro Rewind is NTSC-U only.** With the PAL region decision (see docs/REGION_DECISION.md), this phase requires either flipping to NTSC-U (and redoing Phase 4 RAM work) or dropping RR entirely. If kept, likely work:
+- Flip project region to NTSC-U, or stand up a parallel NTSC-U track.
 - Custom savestates per RR track.
-- Verify RAM addresses are unchanged (they should be — RR is a code mod, not an engine fork — but verify on at least 3 tracks).
+- Verify RAM addresses (would need NTSC-U port of VIPTankz's PAL pointers).
 - Retrain multi-track model on combined vanilla + RR pool.
 
-Out of scope for initial spec. Revisit after Phase 4.
+Out of scope for initial spec. Revisit after Phase 4 with a deliberate region-flip decision.
 
 ---
 

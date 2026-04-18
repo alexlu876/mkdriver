@@ -53,8 +53,8 @@ def main() -> int:
     p.add_argument(
         "--fps",
         type=int,
-        default=60,
-        help="Playback FPS (MKWii native = 60).",
+        default=50,
+        help="Playback FPS (PAL MKWii native = 50).",
     )
     args = p.parse_args()
 

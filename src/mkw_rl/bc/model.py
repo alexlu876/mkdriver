@@ -2,7 +2,7 @@
 
 Architecture (see MKW_RL_SPEC.md §2.2):
 
-Input:   (B, T, stack=4, H=114, W=140), grayscale, float in [0, 1]
+Input:   (B, T, stack=4, H=75, W=140), grayscale, float in [0, 1]
 
 Encoder: IMPALA-style CNN applied per-timestep
     Block 1: Conv(in=4, out=16) → MaxPool(3x3, s=2) → 2 residual blocks
@@ -88,7 +88,7 @@ class ImpalaEncoder(nn.Module):
         in_channels: int = 4,
         channels: tuple[int, int, int] = (16, 32, 32),
         feature_dim: int = 256,
-        input_hw: tuple[int, int] = (114, 140),
+        input_hw: tuple[int, int] = (75, 140),
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -128,7 +128,7 @@ class ImpalaEncoder(nn.Module):
 @dataclass(frozen=True)
 class BCPolicyConfig:
     stack_size: int = 4
-    input_hw: tuple[int, int] = (114, 140)
+    input_hw: tuple[int, int] = (75, 140)
     encoder_channels: tuple[int, int, int] = (16, 32, 32)
     feature_dim: int = 256
     lstm_hidden: int = 512

@@ -56,7 +56,7 @@ def load_frame_dump(frame_dir: Path | str) -> FrameDump:
     they actually need.
 
     Recursive: Dolphin commonly writes frame dumps to a game-ID subdirectory
-    (e.g. ``Dump/Frames/RMCE01/framedump_0.png``), not directly in
+    (e.g. ``Dump/Frames/RMCP01/framedump_0.png``), not directly in
     ``Dump/Frames/``. We use rglob so either layout works.
     """
     frame_dir = Path(frame_dir)
@@ -74,7 +74,7 @@ def load_frame_dump(frame_dir: Path | str) -> FrameDump:
 
 def load_frame(
     path: Path | str,
-    size: tuple[int, int] = (140, 114),
+    size: tuple[int, int] = (140, 75),
     grayscale: bool = True,
 ) -> np.ndarray:
     """Load one frame and return it as a numpy array.
@@ -83,7 +83,7 @@ def load_frame(
         path: PNG path.
         size: Target (width, height). Dolphin dumps at native resolution
             (up to 640×528 + upscales) which we downsize here to match
-            the BTR-paper 140×114 grayscale spec.
+            the BTR-paper 140×75 grayscale spec.
         grayscale: If True, return shape (H, W) uint8. If False, (H, W, 3).
 
     Returns:

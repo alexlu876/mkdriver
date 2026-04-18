@@ -127,10 +127,10 @@ class TestHeaderParsing:
             parse_dtm(p)
 
     def test_wrong_game_id(self, tmp_path: Path) -> None:
-        blob = _minimal_valid_blob(game_id=b"RMCP01")  # PAL
+        blob = _minimal_valid_blob(game_id=b"RMCE01")  # NTSC-U
         p = tmp_path / "r.dtm"
         p.write_bytes(blob)
-        with pytest.raises(DtmRegionError, match="not NTSC-U"):
+        with pytest.raises(DtmRegionError, match="not PAL"):
             parse_dtm(p)
 
     def test_not_wii(self, tmp_path: Path) -> None:

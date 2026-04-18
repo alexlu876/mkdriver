@@ -92,7 +92,7 @@ class TestMetrics:
 
 class TestRunModelOnDemo:
     def _model(self) -> BCPolicy:
-        cfg = BCPolicyConfig(stack_size=4, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+        cfg = BCPolicyConfig(stack_size=4, input_hw=(75, 140), feature_dim=32, lstm_hidden=32)
         return BCPolicy(cfg)
 
     def test_output_shapes(self, tmp_path: Path) -> None:
@@ -105,7 +105,7 @@ class TestRunModelOnDemo:
             stack_size=4,
             frame_skip=4,
             chunk_len=16,
-            frame_size=(140, 114),
+            frame_size=(140, 75),
         )
         assert preds["steering_pred_logits"].shape == (40, N_STEERING_BINS)
         assert preds["pred_steering_bin"].shape == (40,)
@@ -126,7 +126,7 @@ class TestRunModelOnDemo:
             stack_size=4,
             frame_skip=4,
             chunk_len=16,
-            frame_size=(140, 114),
+            frame_size=(140, 75),
         )
         preds_one = run_model_on_demo(
             model,
@@ -135,7 +135,7 @@ class TestRunModelOnDemo:
             stack_size=4,
             frame_skip=4,
             chunk_len=80,
-            frame_size=(140, 114),
+            frame_size=(140, 75),
         )
         # Tensors should match.
         assert torch.allclose(
@@ -173,7 +173,7 @@ class TestExtractGroundTruth:
 class TestSideBySideVideo:
     def test_writes_valid_mp4(self, tmp_path: Path) -> None:
         samples = _synth_demo(tmp_path, 30)
-        model = BCPolicy(BCPolicyConfig(stack_size=4, input_hw=(114, 140), feature_dim=32, lstm_hidden=32))
+        model = BCPolicy(BCPolicyConfig(stack_size=4, input_hw=(75, 140), feature_dim=32, lstm_hidden=32))
         preds = run_model_on_demo(model, samples, device=torch.device("cpu"), chunk_len=16)
         out = tmp_path / "sbs.mp4"
         path = write_side_by_side_video(samples, preds, out, fps=30, n_seconds=None)

@@ -67,7 +67,7 @@ SAVESTATE_PATH = r"{savestate_path}"
 _HEADER_SIZE = 0x100
 _BYTES_PER_INPUT = 8
 _EXPECTED_SIG = b"DTM\\x1a"
-_EXPECTED_GAME_ID = b"RMCE01"
+_EXPECTED_GAME_ID = b"RMCP01"
 
 
 def _parse_frames(dtm_path):
@@ -84,7 +84,7 @@ def _parse_frames(dtm_path):
     if data[:4] != _EXPECTED_SIG:
         raise RuntimeError("bad dtm signature")
     if data[4:10] != _EXPECTED_GAME_ID:
-        raise RuntimeError("dtm is not NTSC-U RMCE01")
+        raise RuntimeError("dtm is not PAL RMCP01")
     # Reject multi-controller (spec §1.1; parser.py B-2 fix).
     controllers_bitfield = data[0x0B]
     if controllers_bitfield != 0x01:
@@ -169,7 +169,7 @@ def main() -> int:
         "--iso",
         required=True,
         type=Path,
-        help="Path to the NTSC-U MKWii ISO (RMCE01).",
+        help="Path to the PAL MKWii ISO (RMCP01).",
     )
     p.add_argument(
         "--frames-out",
@@ -233,7 +233,7 @@ def main() -> int:
 
     # Move the dumped PNGs to the output directory.
     args.frames_out.mkdir(parents=True, exist_ok=True)
-    # Recursive because Dolphin may write to Dump/Frames/RMCE01/.
+    # Recursive because Dolphin may write to Dump/Frames/RMCP01/.
     pngs = sorted(args.dolphin_dump_dir.rglob("*.png"))
     if not pngs:
         print(

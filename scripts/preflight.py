@@ -68,7 +68,21 @@ def check_platform() -> CheckResult:
 def check_dolphin_binary(dolphin_path: str | None) -> CheckResult:
     if not dolphin_path:
         return CheckResult("dolphin-binary", "skip", "no --dolphin provided")
-    resolved = shutil.which(dolphin_path) or (dolphin_path if Path(dolphin_path).exists() else None)
+
+    p = Path(dolphin_path)
+    # macOS `.app` bundles aren't directly executable; the real binary lives
+    # at Contents/MacOS/<name>. Resolve automatically.
+    if p.suffix == ".app" and p.is_dir():
+        inner = p / "Contents" / "MacOS" / p.stem
+        if not inner.exists():
+            return CheckResult(
+                "dolphin-binary",
+                "fail",
+                f".app bundle {p} has no inner binary at {inner}",
+            )
+        resolved = str(inner)
+    else:
+        resolved = shutil.which(dolphin_path) or (str(p) if p.exists() else None)
     if not resolved:
         return CheckResult("dolphin-binary", "fail", f"not found: {dolphin_path}")
     try:
@@ -87,8 +101,10 @@ def check_dolphin_binary(dolphin_path: str | None) -> CheckResult:
     if not combined:
         return CheckResult(
             "dolphin-binary",
-            "fail",
-            f"{resolved} --version produced no output",
+            # Pre-compiled distributions may not print a version banner to
+            # stderr; treat silent success as a warn rather than hard fail.
+            "warn",
+            f"{resolved} --version produced no output (binary may not support --version)",
             data={"binary": resolved},
         )
     return CheckResult(
@@ -164,7 +180,7 @@ def print_summary(results: list[CheckResult]) -> int:
     print("checklist in docs/PREFLIGHT.md — you must still work through that")
     print("by hand. In particular, this script cannot verify:")
     print("  - whether the fork builds (step 1)")
-    print("  - whether NTSC-U MKWii boots (step 2)")
+    print("  - whether PAL MKWii boots (step 2)")
     print("  - whether the scripting API works (step 3)")
     print("  - which Python the fork links against (step 4)")
     print("  - savestate load determinism (step 6)")

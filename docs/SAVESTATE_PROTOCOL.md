@@ -1,6 +1,8 @@
 # Savestate protocol
 
-Every per-track savestate used in this project must be created following this exact protocol. Deviations break RNG determinism and cascade into silent data corruption in the BC and RL pipelines.
+> **First: prefer VIPTankz's savestate bundle.** Since the project now runs on PAL (see [REGION_DECISION.md](REGION_DECISION.md)), the primary source for Luigi Circuit savestates is `python3 scripts/download_savestates.py` in `~/code/mkw/Wii-RL`, which downloads their pre-built `MarioKartSaveStates/` directory. Use that for Phase 1-2 bring-up. This document is for (a) fallback if the download fails, (b) the Phase 3 multi-track effort where you build savestates for tracks VIPTankz didn't ship, or (c) when you need a non-standard anchor frame.
+
+Every per-track savestate you create manually must follow this exact protocol. Deviations break RNG determinism and cascade into silent data corruption in the BC and RL pipelines.
 
 ## Why this matters
 
@@ -16,7 +18,7 @@ Two savestates made at "the same moment" but a few VIs apart will have different
 
 ### Step 1 — Prepare Dolphin
 
-Run VIPTankz's fork. Load your NTSC-U `RMCE01` ISO.
+Run VIPTankz's Dolphin (`~/code/mkw/Wii-RL/dolphin0/DolphinQt.app`). Load your PAL `RMCP01` ISO.
 
 Pre-conditions on the Dolphin side:
 
@@ -57,7 +59,7 @@ Create `data/savestates/{track_slug}.json` with this exact structure:
 
 ```json
 {
-  "game_id": "RMCE01",
+  "game_id": "RMCP01",
   "track": "luigi_circuit",
   "mode": "time_trial",
   "character": "mario",
@@ -72,7 +74,7 @@ Field reference:
 
 | Field | Required | Notes |
 |---|---|---|
-| `game_id` | yes | Always `RMCE01` — sanity check. |
+| `game_id` | yes | Always `RMCP01` — sanity check. |
 | `track` | yes | Lowercase slug without `_tt`. |
 | `mode` | yes | `time_trial`, `gp`, `vs`, `battle`. |
 | `character` | yes | Driver. For vanilla tracks use `mario` unless a specific experiment needs otherwise. |
@@ -151,6 +153,6 @@ Maintain this list as tracks are covered.
 Do NOT:
 
 - Save at an arbitrary mid-race frame. Always use the consistent pre-input anchor.
-- Share savestates across regions. A PAL savestate will not load on NTSC-U even if the VI count matches.
+- Share savestates across regions. An NTSC-U savestate will not load on PAL even if the VI count matches.
 - Skip the JSON sidecar. The VI count is not optional.
 - Use Dolphin's slot 0 (slot 0 is commonly overwritten by accident). Slot 1+.

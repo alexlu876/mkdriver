@@ -85,28 +85,28 @@ class TestFrameDumpLoader:
 
     def test_recursive_finds_game_id_subdir(self, tmp_path: Path) -> None:
         """Dolphin writes to Dump/Frames/<GAMEID>/, so rglob is required."""
-        subdir = tmp_path / "RMCE01"
+        subdir = tmp_path / "RMCP01"
         subdir.mkdir()
         for i in range(3):
             Image.new("RGB", (4, 4)).save(subdir / f"framedump_{i}.png")
         dump = load_frame_dump(tmp_path)
         assert len(dump.frame_paths) == 3
-        assert all(p.parent.name == "RMCE01" for p in dump.frame_paths)
+        assert all(p.parent.name == "RMCP01" for p in dump.frame_paths)
 
 
 class TestLoadFrame:
     def test_grayscale_shape(self, tmp_path: Path) -> None:
         p = tmp_path / "f.png"
         Image.new("RGB", (320, 240), color=(100, 150, 200)).save(p)
-        arr = load_frame(p, size=(140, 114), grayscale=True)
-        assert arr.shape == (114, 140)
+        arr = load_frame(p, size=(140, 75), grayscale=True)
+        assert arr.shape == (75, 140)
         assert arr.dtype == np.uint8
 
     def test_rgb_shape(self, tmp_path: Path) -> None:
         p = tmp_path / "f.png"
         Image.new("RGB", (320, 240), color=(100, 150, 200)).save(p)
-        arr = load_frame(p, size=(140, 114), grayscale=False)
-        assert arr.shape == (114, 140, 3)
+        arr = load_frame(p, size=(140, 75), grayscale=False)
+        assert arr.shape == (75, 140, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +167,8 @@ class TestVisualizer:
     def test_write_overlay_video_produces_mp4(self, tmp_path: Path) -> None:
         dtm = tmp_path / "d.dtm"
         frames = tmp_path / "f"
-        _write_synthetic_dtm(dtm, 60)  # 1 second at 60 fps
-        _write_synthetic_frames(frames, 60)
+        _write_synthetic_dtm(dtm, 50)  # 1 second at 50 fps (PAL)
+        _write_synthetic_frames(frames, 50)
         pairs = pair_dtm_and_frames(dtm, frames, tail_margin=0)
         out = tmp_path / "overlay.mp4"
         # Small fps keeps encoding fast in CI.

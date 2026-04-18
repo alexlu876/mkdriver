@@ -93,9 +93,9 @@ class TestDatasetBasics:
 class TestDatasetItem:
     def test_item_shapes_and_types(self, tmp_path: Path) -> None:
         samples = _synth_paired_samples(tmp_path, 50)
-        ds = MkwBCDataset({"d": samples}, stack_size=4, frame_skip=4, seq_len=16, frame_size=(140, 114))
+        ds = MkwBCDataset({"d": samples}, stack_size=4, frame_skip=4, seq_len=16, frame_size=(140, 75))
         item = ds[0]
-        assert item["frames"].shape == (16, 4, 114, 140)
+        assert item["frames"].shape == (16, 4, 75, 140)
         assert item["frames"].dtype == torch.float32
         assert torch.all(item["frames"] >= 0.0) and torch.all(item["frames"] <= 1.0)
         for key in ("accelerate", "brake", "drift", "item"):

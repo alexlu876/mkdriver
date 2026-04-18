@@ -133,7 +133,7 @@ def run_model_on_demo(
     stack_size: int = 4,
     frame_skip: int = 4,
     chunk_len: int = 32,
-    frame_size: tuple[int, int] = (140, 114),
+    frame_size: tuple[int, int] = (140, 75),
 ) -> dict[str, torch.Tensor]:
     """Run the BC model across a full demo with carried hidden state.
 
@@ -239,7 +239,7 @@ def write_side_by_side_video(
     samples: list[PairedSample],
     predictions: dict[str, Any],
     output_path: Path | str,
-    fps: int = 60,
+    fps: int = 50,
     n_seconds: int | None = 30,
 ) -> Path:
     """Render an MP4 with GT overlay (left) and predicted overlay (right) per frame."""

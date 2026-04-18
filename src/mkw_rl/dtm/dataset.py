@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-DEFAULT_FRAME_SIZE: tuple[int, int] = (140, 114)  # (width, height) — matches BTR paper
+DEFAULT_FRAME_SIZE: tuple[int, int] = (140, 75)  # (width, height) — matches VIPTankz's MKWii BTR impl
 
 
 # ---------------------------------------------------------------------------

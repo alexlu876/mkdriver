@@ -33,7 +33,7 @@ Violating any of these silently shifts frame-to-input alignment by tens of frame
    - `Dump Frames` ON
    - `Dump Frames as Images` ON (forces PNG over AVI)
 
-5. Load the ISO: `File → Open` → your NTSC-U MKWii ISO.
+5. Load the ISO: `File → Open` → your PAL MKWii ISO.
 
 6. **Immediately pause**: `Emulation → Pause`. Dolphin will boot into the title screen but we want to block it before it produces pre-.dtm frames.
 
@@ -66,5 +66,5 @@ Violating any of these silently shifts frame-to-input alignment by tens of frame
 - **Fewer PNGs than input frames in the `.dtm`**: expected (lag frames don't render). The pairing module trims to `min(len)`; small discrepancies are fine.
 - **Way fewer PNGs (e.g., half)**: something went wrong. Probably Dolphin's dump buffer overflowed or you stopped emulation before playback completed. Re-record or let the replay run to completion.
 - **PNGs named oddly**: Dolphin has used multiple naming schemes over the years. The loader sorts numerically on any sequence of digits in the filename, so `framedump_1.png`, `frame_0001.png`, and plain `1.png` all work.
-- **PNGs in `Dump/Frames/RMCE01/` subdir, not `Dump/Frames/` directly**: expected on some Dolphin versions. The loader uses recursive glob (`rglob`) so both layouts are handled.
+- **PNGs in `Dump/Frames/RMCP01/` subdir, not `Dump/Frames/` directly**: expected on some Dolphin versions. The loader uses recursive glob (`rglob`) so both layouts are handled.
 - **Dolphin complains the `.sav` doesn't match the `.dtm`**: the `.dtm` has a hash of the savestate in its header. If the savestate was made under a different Dolphin SHA, the hash won't match. Re-anchor the savestate per `docs/SAVESTATE_PROTOCOL.md`.

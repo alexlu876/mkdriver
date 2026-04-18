@@ -7,7 +7,7 @@ This is the user-facing protocol for recording a `.dtm` input log suitable for t
 ## Setup (per session)
 
 1. Launch VIPTankz's Dolphin scripting fork.
-2. Load your NTSC-U MKWii ISO (`RMCE01`).
+2. Load your PAL MKWii ISO (`RMCP01`).
 3. `Config → Graphics → Advanced`. Ensure **Dump Frames is OFF**. Recording has nothing to do with dumping; these are two separate Dolphin features and they do not compose well during recording.
 4. Verify the controller profile: `Controllers → GameCube Controllers → Port 1 → Standard Controller`. The `.dtm` format only supports GameCube controllers in this project (see MKW_RL_SPEC.md Fixed Assumptions).
 
@@ -36,12 +36,12 @@ print(f'lag_count in header: {header.lag_count}')
 
 Expected:
 
-- `game_id` == `b'RMCE01'`.
+- `game_id` == `b'RMCP01'`.
 - `from_savestate` == `True`.
-- `input frames` in the thousands (a 90-second lap at 60fps is ~5400 frames).
+- `input frames` in the thousands (a 90-second lap at 50 fps — PAL — is ~4500 frames).
 - `lag_count` ideally 0 — if nonzero, log it in your notes. The demo is still usable but may have alignment issues.
 
-If parsing fails at this point: the `.dtm` is malformed, or you've recorded against a non-NTSC-U copy. Stop and re-record.
+If parsing fails at this point: the `.dtm` is malformed, or you've recorded against a non-PAL copy. Stop and re-record.
 
 ## Next: replay to produce paired frames
 

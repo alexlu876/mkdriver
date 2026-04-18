@@ -26,7 +26,7 @@ class TestSavestateSidecar:
         sidecar.write_text(
             json.dumps(
                 {
-                    "game_id": "RMCE01",
+                    "game_id": "RMCP01",
                     "track": "luigi_circuit",
                     "vi_count": 3427,
                     "skip_first_n": 42,
@@ -38,7 +38,7 @@ class TestSavestateSidecar:
     def test_missing_key_raises(self, tmp_path: Path) -> None:
         pd = _load_parse_demo()
         sidecar = tmp_path / "bad.json"
-        sidecar.write_text(json.dumps({"game_id": "RMCE01"}))  # no skip_first_n
+        sidecar.write_text(json.dumps({"game_id": "RMCP01"}))  # no skip_first_n
         with pytest.raises(KeyError, match="skip_first_n"):
             pd._skip_first_n_from_savestate(sidecar)
 

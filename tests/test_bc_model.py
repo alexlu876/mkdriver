@@ -32,15 +32,15 @@ class TestImpalaComponents:
 
 class TestEncoder:
     def test_encoder_output_shape(self) -> None:
-        enc = ImpalaEncoder(in_channels=4, feature_dim=256, input_hw=(114, 140))
-        x = torch.randn(3, 4, 114, 140)
+        enc = ImpalaEncoder(in_channels=4, feature_dim=256, input_hw=(75, 140))
+        x = torch.randn(3, 4, 75, 140)
         out = enc(x)
         assert out.shape == (3, 256)
 
     def test_encoder_batch_invariance(self) -> None:
-        enc = ImpalaEncoder(in_channels=4, feature_dim=256, input_hw=(114, 140))
+        enc = ImpalaEncoder(in_channels=4, feature_dim=256, input_hw=(75, 140))
         enc.eval()
-        x = torch.randn(5, 4, 114, 140)
+        x = torch.randn(5, 4, 75, 140)
         with torch.no_grad():
             out_full = enc(x)
             out_split = torch.cat([enc(x[:2]), enc(x[2:])], dim=0)
@@ -55,7 +55,7 @@ class TestBCPolicyForward:
         model = self._model()
         model.eval()
         B, T = 2, 8
-        x = torch.rand(B, T, 4, 114, 140)
+        x = torch.rand(B, T, 4, 75, 140)
         with torch.no_grad():
             logits, (h, c) = model(x)
         assert logits["steering"].shape == (B, T, N_STEERING_BINS)
@@ -70,7 +70,7 @@ class TestBCPolicyForward:
         model = self._model()
         model.eval()
         B, T = 2, 8
-        x_full = torch.rand(B, T, 4, 114, 140)
+        x_full = torch.rand(B, T, 4, 75, 140)
 
         with torch.no_grad():
             # One-shot forward.
@@ -97,12 +97,12 @@ class TestBCPolicyForward:
     def test_wrong_input_shape_raises(self) -> None:
         model = self._model()
         with pytest.raises(ValueError):
-            model(torch.randn(2, 8, 4, 114))  # missing W
+            model(torch.randn(2, 8, 4, 75))  # missing W
         with pytest.raises(ValueError):
             # Wrong stack size.
             cfg = BCPolicyConfig(stack_size=4)
             m = BCPolicy(cfg)
-            m(torch.randn(2, 8, 3, 114, 140))
+            m(torch.randn(2, 8, 3, 75, 140))
 
     def test_initial_hidden_shape(self) -> None:
         model = self._model()
@@ -116,7 +116,7 @@ class TestBCLoss:
     def test_loss_forward_and_backward(self) -> None:
         model = BCPolicy(BCPolicyConfig())
         B, T = 2, 8
-        x = torch.rand(B, T, 4, 114, 140)
+        x = torch.rand(B, T, 4, 75, 140)
         logits, _ = model(x)
         targets = {
             "steering_bin": torch.randint(0, N_STEERING_BINS, (B, T)),
@@ -137,7 +137,7 @@ class TestBCLoss:
     def test_loss_weights_zero_means_no_contribution(self) -> None:
         model = BCPolicy(BCPolicyConfig())
         B, T = 1, 2
-        x = torch.rand(B, T, 4, 114, 140)
+        x = torch.rand(B, T, 4, 75, 140)
         logits, _ = model(x)
         targets = {
             "steering_bin": torch.zeros(B, T, dtype=torch.long),
@@ -157,7 +157,7 @@ class TestGradientFlow:
     def test_lstm_gets_gradient(self) -> None:
         model = BCPolicy(BCPolicyConfig())
         B, T = 2, 4
-        x = torch.rand(B, T, 4, 114, 140)
+        x = torch.rand(B, T, 4, 75, 140)
         logits, _ = model(x)
         targets = {
             "steering_bin": torch.randint(0, N_STEERING_BINS, (B, T)),

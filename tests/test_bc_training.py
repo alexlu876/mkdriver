@@ -84,7 +84,7 @@ def test_one_epoch_reports_diagnostics(tmp_path: Path) -> None:
     device = torch.device("cpu")
     # Use a small-input model to speed up.
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=64, lstm_hidden=64)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=64, lstm_hidden=64)
     ).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=cfg.epochs)
@@ -113,7 +113,7 @@ def test_loss_decreases_over_two_epochs(tmp_path: Path) -> None:
     _, loader = make_dataset_and_loader(samples_by_demo, cfg, shuffle=False)
     device = torch.device("cpu")
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=64, lstm_hidden=64)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=64, lstm_hidden=64)
     ).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=cfg.epochs)
@@ -157,7 +157,7 @@ def test_hidden_reset_at_demo_boundaries(tmp_path: Path) -> None:
     _, loader = make_dataset_and_loader(samples_by_demo, cfg, shuffle=False)
     device = torch.device("cpu")
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=32, lstm_hidden=32)
     ).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=cfg.epochs)
@@ -173,7 +173,7 @@ def test_truncate_or_rezero_shrink(tmp_path: Path) -> None:
     cfg = _tiny_config()
     device = torch.device("cpu")
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=32, lstm_hidden=32)
     ).to(device)
     # Build a deliberately non-zero hidden state.
     h = torch.randn(1, 4, 32)
@@ -191,7 +191,7 @@ def test_truncate_or_rezero_grow(tmp_path: Path) -> None:
     cfg = _tiny_config()
     device = torch.device("cpu")
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=32, lstm_hidden=32)
     ).to(device)
     h = torch.randn(1, 2, 32)
     c = torch.randn(1, 2, 32)
@@ -212,7 +212,7 @@ def test_val_epoch_runs(tmp_path: Path) -> None:
     _, loader = make_dataset_and_loader(samples, cfg, shuffle=False)
     device = torch.device("cpu")
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=32, lstm_hidden=32)
     ).to(device)
     v = val_epoch(model, loader, cfg, device)
     assert v.n_batches > 0
@@ -234,7 +234,7 @@ def test_parametrized_batch_sizes(tmp_path: Path, batch_size: int) -> None:
     _, loader = make_dataset_and_loader(samples_by_demo, cfg, shuffle=False)
     device = torch.device("cpu")
     model = BCPolicy(
-        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(114, 140), feature_dim=32, lstm_hidden=32)
+        BCPolicyConfig(stack_size=cfg.stack_size, input_hw=(75, 140), feature_dim=32, lstm_hidden=32)
     ).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
     stats = train_epoch(model, loader, optim, None, cfg, device)

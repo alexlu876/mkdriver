@@ -7,7 +7,7 @@ drifts), then the parser + pairing are working. If it doesn't, nothing
 downstream can be trusted.
 
 The overlay is drawn with PIL on the full-resolution frame (not the
-downsized 140×114 network input) so the user has a clear visual
+downsized 140×75 network input) so the user has a clear visual
 reference. Frames are composited into an MP4 via imageio.
 """
 
@@ -152,7 +152,7 @@ def render_overlay(sample: PairedSample, font: ImageFont.ImageFont | None = None
 def write_overlay_video(
     samples: list[PairedSample],
     output_path: Path | str,
-    fps: int = 60,
+    fps: int = 50,
     n_seconds: int | None = 30,
 ) -> Path:
     """Render an overlay MP4 from a list of PairedSamples.
@@ -160,8 +160,8 @@ def write_overlay_video(
     Args:
         samples: Samples in playback order.
         output_path: Destination .mp4 path.
-        fps: Output frame rate. MKWii runs at 60 VIs per second; use 60 here
-            unless you explicitly downsampled.
+        fps: Output frame rate. PAL MKWii runs at 50 VIs per second; use 50
+            here unless you explicitly downsampled.
         n_seconds: If set, cap to the first ``n_seconds * fps`` frames. Use
             None for the full duration.
 

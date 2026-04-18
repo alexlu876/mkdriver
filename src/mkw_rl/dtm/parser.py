@@ -4,9 +4,9 @@ References:
   - TASVideos DTM spec: https://tasvideos.org/EmulatorResources/Dolphin/DTM
   - Dolphin Source/Core/Core/Movie.cpp (ground truth when the wiki is ambiguous).
 
-We only support NTSC-U MKWii (game_id == b"RMCE01") with GCN port 1 (GameCube
-controller on first port). PAL / NTSC-J / Korean and Wiimote-only inputs are
-rejected.
+We only support PAL MKWii (game_id == b"RMCP01") with GCN port 1 (GameCube
+controller on first port). NTSC-U / NTSC-J / Korean and Wiimote-only inputs
+are rejected.
 
 The parser returns a (DtmHeader, list[ControllerState]) pair. The header surfaces
 the fields downstream code actually needs — vi_count, input_count, lag_count,
@@ -40,7 +40,7 @@ AUTHOR_OFFSET = 0x031
 AUTHOR_SIZE = 32
 
 EXPECTED_SIG = b"DTM\x1a"
-EXPECTED_GAME_ID = b"RMCE01"
+EXPECTED_GAME_ID = b"RMCP01"
 BYTES_PER_INPUT = 8
 
 
@@ -49,7 +49,7 @@ class DtmFormatError(ValueError):
 
 
 class DtmRegionError(ValueError):
-    """Raised when the .dtm is for a game ID other than NTSC-U MKWii."""
+    """Raised when the .dtm is for a game ID other than PAL MKWii."""
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ def _parse_header(data: bytes) -> DtmHeader:
 
     game_id = data[GAME_ID_OFFSET : GAME_ID_OFFSET + GAME_ID_SIZE]
     if game_id != EXPECTED_GAME_ID:
-        raise DtmRegionError(f"game_id {game_id!r} is not NTSC-U MKWii; this project is NTSC-U only")
+        raise DtmRegionError(f"game_id {game_id!r} is not PAL MKWii; this project is PAL only")
 
     is_wii = data[IS_WII_OFFSET] == 1
     if not is_wii:
@@ -213,7 +213,7 @@ def _parse_controller_frame(frame_bytes: bytes, frame_idx: int) -> ControllerSta
 def parse_dtm(path: Path | str) -> tuple[DtmHeader, list[ControllerState]]:
     """Parse a .dtm file into (header, per-frame controller states).
 
-    Validates NTSC-U (RMCE01) and GCN port 1. Raises DtmFormatError on
+    Validates PAL (RMCP01) and GCN port 1. Raises DtmFormatError on
     malformed input, DtmRegionError on wrong game ID.
     """
     path = Path(path)

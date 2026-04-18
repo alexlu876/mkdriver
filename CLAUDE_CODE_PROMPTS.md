@@ -1,96 +1,93 @@
-# Claude Code prompt sequence (v2)
+# Claude Code prompt sequence (v3)
 
-Feed these to Claude Code one at a time. Each prompt assumes Claude Code has read `MKW_RL_SPEC.md` in full. For each prompt after the first, start the session with: *"Re-read MKW_RL_SPEC.md before starting."*
+Feed these to Claude Code one at a time. Each prompt assumes Claude Code has read `MKW_RL_SPEC.md` and `docs/PIVOT_2026-04-17.md` in full. For each prompt after the first, start the session with: *"Re-read MKW_RL_SPEC.md and docs/PIVOT_2026-04-17.md before starting."*
 
 Each prompt is designed to produce one reviewable PR. Do not chain prompts; wait for a clean result before moving on.
 
-**What changed from v1**: Prompt P-1 (preflight) is new and mandatory before Prompt 0. Prompt 1d (action encoding) is new. Prompts 2a and 2b have been updated for IMPALA CNN, discretized steering, and TBPTT.
+**What changed from v2 (pivot 2026-04-17)**: Project skipped the BC path entirely and jumped to multi-track BTR. Prompts 1a-2c are complete but produced **dormant** code (still tested, just not on the critical path). The new Prompts 3-5 drive the env fork, BTR fork, and Vast.ai training bring-up. See `docs/PIVOT_2026-04-17.md` for rationale.
 
 ---
 
 ## Prompt P-1 — Preflight (user-run, Claude Code authors the checklist only)
 
+**Status: done (scaffolding). User-side execution still required before Prompt 0.**
+
 > Read MKW_RL_SPEC.md §P-1. Generate `scripts/preflight.py` (a thin wrapper that runs the mechanical parts of the checklist — e.g., verifying a RAM read succeeds from a running Dolphin scripting session) and `docs/PREFLIGHT.md` with the full six-step human checklist. Do NOT attempt to run any of it; the user runs P-1 on their own machine. Report completion and wait for the user to confirm all six checks passed and report back the Dolphin fork commit SHA + Python interpreter path that the scripting API actually links against. Commit as "preflight scaffolding".
 
-**User then runs P-1 manually and reports back the commit SHA and Python path. Update MKW_RL_SPEC.md §0.1 and §0.3 with those values before Prompt 0.**
+**User then runs P-1 manually and reports back the commit SHA and Python path. Update `SETUP.md` and `.gitmodules` with the real SHA before Prompt 3.**
 
 ---
 
 ## Prompt 0 — Bootstrap
 
-> Re-read MKW_RL_SPEC.md. The user has completed P-1 and reported back `<SHA>` for the Dolphin fork and `<python-path>` for the interpreter. Execute Phase 0 in full: init the repo with `uv` (using `<python-path>` if it differs from a uv-managed 3.13), install dependencies as specified in §0.1, create the directory layout from the "Repo layout" section, add the VIPTankz/Wii-RL submodule **pinned to `<SHA>`**, write `SETUP.md` with the macOS Dolphin fork install steps and the pinned SHA prominently recorded. Create `docs/SAVESTATE_PROTOCOL.md` with the Luigi Circuit savestate procedure from §0.4, including the requirement to record the exact VI count in a JSON sidecar. Stop and report status; do not proceed to Phase 1.
+**Status: done (2026-01 bootstrap commit).** No re-run needed.
 
 ---
 
-## Prompt 1a — `.dtm` parser
+## Prompts 1a–1e — `.dtm` + frame pipeline (DORMANT)
 
-> Re-read MKW_RL_SPEC.md §1.1. Implement `src/mkw_rl/dtm/parser.py` with the `ControllerState` and `DtmHeader` dataclasses and `parse_dtm()` function. Header must surface `from_savestate`, `vi_count`, `input_count`, `lag_count`. Write `tests/test_dtm_parser.py` alongside with hand-constructed binary blobs (hold-A, hold-left, truncated, wrong game_id). Use `@pytest.mark.skipif(not path.exists())` for any test that requires a real `.dtm` file. **Before finalizing the parser, read `Source/Core/Core/Movie.cpp` in the VIPTankz submodule to resolve any TASVideos-wiki ambiguity about field widths or VI/input count semantics.** Verify by running `uv run pytest`. Commit as "phase 1.1: .dtm parser".
+**Status: done and tested (124 tests passing). DORMANT — not on the critical path post-pivot.**
 
----
+Prompts 1a (parser), 1b (sanity visualizer + replay scaffolding), 1c (pairing hardening), 1d (action encoding), 1e (sequence dataset) all shipped and committed. The code lives in `src/mkw_rl/dtm/` and is exercised by `tests/test_dtm_parser.py`, `tests/test_pairing.py`, `tests/test_action_encoding.py`, `tests/test_dataset.py`, `tests/test_pipeline_smoke.py`.
 
-## Prompt 1b — Sanity visualizer (intentionally built before full pairing)
-
-> Re-read MKW_RL_SPEC.md §1.3, §1.4, and §1.5. Implement `src/mkw_rl/dtm/frames.py` (`load_frame_dump` + `load_frame`), `src/mkw_rl/dtm/viz.py` (the overlay renderer), and a **minimal** `src/mkw_rl/dtm/pairing.py` that aligns from the **start** (frame 0 ↔ input frame 0, both truncated to `min(len)` from the start with no `skip_first_n` or tail margin yet). Leave a TODO pointing at §1.4 for the full alignment logic. Create `scripts/sanity_check.py` that takes a `.dtm` + frame dir as args and outputs an MP4 of the first 30 seconds with overlays. Also generate `scripts/capture_demo.md` (user-facing recording protocol from §1.2 — record first, replay with dumps second, NEVER both at once) and `scripts/replay_demo.py` (or `REPLAY_PROTOCOL.md` if scripting API limitations block automation). Stop and wait for the user to run sanity_check against a real recording and visually confirm correctness before moving to Prompt 1c.
+**Do not re-run these prompts.** The code stays in the repo as future BC-augmentation scaffolding (see `docs/PIVOT_2026-04-17.md`). If a future Prompt 6 (BC augmentation) is executed, it consumes this pipeline as-is.
 
 ---
 
-## Prompt 1c — Pairing hardening
+## Prompts 2a–2c — BC training (DORMANT)
 
-> Re-read MKW_RL_SPEC.md §1.4. The visualizer confirmed alignment works. Now harden `pairing.py` per the full §1.4 strategy: `skip_first_n` read from the savestate JSON sidecar, `tail_margin` default 10, length-divergence warning threshold `max(30, 0.02 * len(inputs))`, `lag_count > 0` warning, alignment from the start. Add `tests/test_pairing.py` covering: empty sequences, length mismatch warnings, `skip_first_n` truncation, `tail_margin` truncation, and divergence past threshold. Commit as "phase 1.2: pairing hardening".
+**Status: done and tested (124 tests passing). DORMANT — not on the critical path post-pivot.**
 
----
+Prompts 2a (BC model), 2b (BC training loop with TBPTT), 2c (BC eval) all shipped and committed. Code in `src/mkw_rl/bc/`.
 
-## Prompt 1d — Action encoding
-
-> Re-read MKW_RL_SPEC.md §1.7. Implement `src/mkw_rl/dtm/action_encoding.py` with `N_STEERING_BINS = 21`, `encode_steering`, `decode_steering`. Write `tests/test_action_encoding.py` covering round-trip error bounds, edge values (-1, 0, 1), and inverse consistency. Commit as "phase 1.3: action encoding".
+**Do not re-run these prompts.** The code stays as future BC-augmentation scaffolding.
 
 ---
 
-## Prompt 1e — Sequence dataset
+## Prompt 3 — Fork VIPTankz env into `src/mkw_rl/env/`
 
-> Re-read MKW_RL_SPEC.md §1.6. Implement `src/mkw_rl/dtm/dataset.py` with the `MkwBCDataset` class that returns fixed-length sequences with `is_continuation` metadata, respecting demo boundaries (no splicing across demos). Also implement a `DemoAwareBatchSampler` that pins each batch position to a demo and consumes windows in order. Write `scripts/parse_demo.py` that takes a `.dtm` + frame dir, runs parser → pairing → action encoding → dataset, and pickles the result to `data/processed/user_demos/`. Add pytest coverage for dataset edge cases: demo shorter than `seq_len`, stacking padding at demo start, `is_continuation` flag correctness. Commit as "phase 1.4: sequence dataset".
+**Depends on: P-1 passed, submodule SHA pinned to real value.**
 
----
-
-## Prompt 2a — BC model (IMPALA + stateful LSTM)
-
-> Re-read MKW_RL_SPEC.md §2.2. Implement `src/mkw_rl/bc/model.py` with the `BCPolicy` class per the architecture diagram: IMPALA-style CNN encoder (3 blocks with max-pool + 2 residual blocks each, 16/32/32 channels, 4-channel grayscale input), applied per-timestep over a `(B, T, 4, H, W)` input; LSTM with `hidden_dim=512`, 1 layer, stateful; heads for 21-bin steering (linear to 21 logits), and four binary buttons (linear to 1 logit each). `forward(frames, hidden) -> (logits_dict, new_hidden)`. Write `tests/test_bc_model.py` with: output shape smoke test at `(B=2, T=8, 4, 114, 140)`; hidden state round-trip determinism (same input + hidden → same output); parameter count sanity check (<5M params). Commit as "phase 2.1: BC model".
+> Re-read MKW_RL_SPEC.md §4 (renumbered to current Phase 2 per `docs/PIVOT_2026-04-17.md`) and `docs/REGION_DECISION.md`. Fork `third_party/Wii-RL/DolphinEnv.py` → `src/mkw_rl/env/dolphin_env.py` and `third_party/Wii-RL/DolphinScript.py` → `src/mkw_rl/env/dolphin_script.py`. Preserve VIPTankz's PAL RAM pointers (`0x809BD730`, `0x809C18F8`, `0x809C3618`) verbatim — do not re-derive. Port the reward function as-is (progress + position). Adapt the env class to: (a) use our logging conventions (standard `logging` module, not prints where avoidable), (b) accept a savestate directory pointing at `data/savestates/` so we can load any track's savestate by track slug, (c) extend `reset()` with a `track_slug` argument (optional; if None, sample uniformly from available savestates) that loads the corresponding savestate, (d) remain gymnasium-compliant. Observation space: `Box(0, 255, shape=(4, 75, 140), dtype=uint8)` per VIPTankz. Action space: `Discrete(40)` per VIPTankz. Write `tests/test_env_smoke.py` that verifies the env instantiates without Dolphin running (unit-testable parts only) — the full integration test requires a live Dolphin and is human-driven. Commit as "phase 2.1: env fork".
 
 ---
 
-## Prompt 2b — BC training loop with TBPTT
+## Prompt 4 — Fork BTR into `src/mkw_rl/rl/`
 
-> Re-read MKW_RL_SPEC.md §2.3. Implement `src/mkw_rl/bc/train.py` and `scripts/train_bc.py` + `configs/bc.yaml`. Key requirements: (1) TBPTT loop that detaches hidden state after each backward, (2) hidden state reset only at demo boundaries per the `is_continuation` flag, never at arbitrary batch boundaries, (3) AdamW + cosine schedule + grad clipping at 1.0, (4) wandb logging if `WANDB_API_KEY` is set else CSV, (5) checkpoint every N epochs and best-val-loss. Run the dry-run test specified in §2.3: 1 epoch on the user's processed demos. **Report back all three sanity diagnostics** explicitly: (a) per-bin steering CE decreasing across bins (not just bin 10), (b) A-button training F1 > 0.6, (c) LSTM gradient norm > 1e-4. If any of the three fail, stop and ask before iterating. Commit as "phase 2.2: BC training".
+**Depends on: Prompt 3 done, user has at least one savestate recorded (Luigi Circuit minimum for smoke testing).**
 
----
-
-## Prompt 2c — BC eval
-
-> Re-read MKW_RL_SPEC.md §2.4. Implement `src/mkw_rl/bc/eval.py` + `scripts/eval_bc.py`. Compute offline metrics (steering top-1 and top-3 accuracy, per-button F1, joint accuracy with ±1 bin tolerance) on a held-out demo. Produce a side-by-side overlay video: left pane = ground-truth controller state (decoded from the held-out demo's action tensors), right pane = predicted controller state (model run with carried hidden state across the full held-out demo, not reset per-window). Commit as "phase 2.3: BC eval".
+> Re-read MKW_RL_SPEC.md and `docs/PIVOT_2026-04-17.md`. Fork `third_party/Wii-RL/BTR.py` → `src/mkw_rl/rl/btr.py`. Keep the `FactorizedNoisyLinear`, `Dueling`, `ImpalaCNNLargeIQN`, `PER` / `SumTree`, and `Agent` classes verbatim (these are the validated BTR implementation). Extract the `main()` training loop into `scripts/train_btr.py` and replace hardcoded config with a `configs/btr.yaml` that mirrors VIPTankz's defaults (batch size 256, lr 1e-4, discount 0.997, n-step 3, per_alpha 0.2, target replace 500, spectral norm on for CUDA / off for MPS, eps_steps 2M, framestack 4, input 75×140). Wire logging to wandb if `WANDB_API_KEY` is set else CSV to `runs/btr/metrics.csv`. **Critical multi-track change**: modify the rollout loop so each `env.reset()` samples a random track_slug from available savestates. Log per-track episode rewards as separate wandb metrics (`track/{slug}/episode_reward`) so we can spot stalled tracks. Add a `tests/test_btr_smoke.py` that runs 100 random-action steps through a mocked-env stub and verifies the PER sample/update path works. Commit as "phase 2.2: BTR fork".
 
 ---
 
-## Checkpoint — do not proceed past this without user review
+## Prompt 5 — Vast.ai bring-up + first real training run
 
-After Prompt 2c succeeds, **stop and reconvene with the user** before starting Phase 3. Decisions to make at this checkpoint:
+**Depends on: Prompt 4 done, user has Vast.ai account + SSH key + payment method set up, user has at least 3 savestates recorded (Luigi Circuit + Moo Moo Meadows + Mushroom Gorge for first real multi-track smoke).**
 
-1. Does the BC model produce visually sensible driving on the eval video?
-2. Is single-track BC good enough, or do we jump to Phase 3 (multi-track) before Phase 4 (RL)?
-3. Which RL algo for Phase 4: PPO or BTR? Both can consume the discretized action output from §1.7, so the bridge is cleaner than v1 implied — decision is now driven by sample efficiency and wall-clock on the target compute, not action-space compatibility.
-4. Is the user ready to commit compute (Vast.ai) for Phase 4, or still iterating locally?
-5. Is an online smoke test (Phase 2.5, §2.4) warranted before Phase 4, or do offline metrics look unambiguous?
+> Re-read `docs/PIVOT_2026-04-17.md`. Write `docs/VAST_AI_SETUP.md` covering: (a) choosing an RTX 4090 instance, (b) SSHing in and rsync-uploading `src/`, `scripts/`, `configs/`, `data/savestates/`, and the VIPTankz submodule, (c) installing Dolphin's Linux build (VIPTankz's `scripts/build-dolphin-linux.sh`), (d) environment-variable setup (`WANDB_API_KEY`, `PYTORCH_CUDA_ALLOC_CONF`), (e) launching training via `python scripts/train_btr.py --config configs/btr.yaml --device cuda`, (f) periodic rsync-back of checkpoints to local `runs/btr/`. **Do not actually run any of this from Claude Code** — the user executes on Vast.ai, Claude Code writes the runbook. Also add a smoke-test section: user should run 10 minutes locally on M4 (device mps, batch_size 32, 2 envs) to verify the training loop doesn't crash before burning Vast.ai credits. Commit as "phase 2.3: Vast.ai runbook".
 
-These decisions change the Phase 3/4 spec meaningfully. Do not let Claude Code pick them unilaterally.
+**User then runs the smoke test locally, reports results, then runs the first real training session on Vast.ai.**
 
 ---
 
-## Prompts 3+ (stubs — re-spec before use)
+## Checkpoint — after ~5M environment steps of multi-track training
 
-- **Prompt 3** — Multi-track data collection + training. Requires 32 savestates (all with documented VI counts) and demo pool. Substantial user work upstream. Architecture is unchanged from Phase 2 (stateful LSTM already supports multi-track).
-- **Prompt 4a** — Fork VIPTankz env into `src/mkw_rl/env/`. Verify RAM reads match expected values on NTSC-U.
-- **Prompt 4b** — Reward function + gym.Env wrapper. Factored vs joint action space decision made here.
-- **Prompt 4c** — RL fine-tune with BC init. Algo choice made at the checkpoint above.
-- **Prompt 5** — Retro Rewind support.
-- **Prompt 6** — Autoresearch / arch search.
+**Stop and reconvene with the user.** At this point we have real training data to answer:
 
-Re-read MKW_RL_SPEC.md and update the appendix stubs before writing prompts 3+.
+1. **Is the policy learning?** Reward curves trending up on at least Luigi Circuit? On any other tracks?
+2. **Track-agnostic generalization holding up?** Or are some tracks stalled (flat reward) while others make progress?
+3. **If generalization is failing:** add track-id conditioning (cheap retrofit — one extra channel or embedding input to the encoder). See `docs/PIVOT_2026-04-17.md` "Research-grade uncertainty" for the diagnostic framing.
+4. **Compute burn rate acceptable?** At $0.40-$0.80/hr per 4090, what's the projected dollar cost to a useful policy, and is that within budget?
+5. **Reward shaping holding?** VIPTankz's progress+position reward works on Luigi; do we need per-track reward tweaks for tracks with loops / anti-grav / shortcuts?
+
+These decisions set direction for Phase 2.5+ (reward tweaks, architecture changes, BC augmentation).
+
+---
+
+## Prompts 6+ (stubs — re-spec before use)
+
+- **Prompt 6** — **BC augmentation** (optional, post-BTR). Revive the dormant `src/mkw_rl/bc/` pipeline. Consume TAS demos from `data/raw/tas/` (user sources from MKWii TAS community; no personal play time required). Either (a) pretrain the IMPALA encoder with BC then load into BTR as a warm start, or (b) add BC loss as an auxiliary term during BTR training. Trigger: only if vanilla multi-track BTR fails to generalize, or if we want to close the gap to TAS-quality driving.
+- **Prompt 7** — **Retro Rewind custom tracks.** Blocked on region conflict: Retro Rewind is NTSC-U-only, we are PAL. Out of scope unless we flip regions (which would redo Prompts 3-5).
+- **Prompt 8** — **Autoresearch / arch search.** Only on Vast.ai with meaningful budget. Deferred until we have a working baseline to search around.
+
+Re-read `MKW_RL_SPEC.md` and `docs/PIVOT_2026-04-17.md` before expanding any Prompt 6+ stub into a real prompt.
