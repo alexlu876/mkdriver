@@ -145,17 +145,17 @@ class TestSumTree:
     def test_find_returns_correct_leaf(self) -> None:
         st = SumTree(size=4)
         # Leaves: priorities [1.0, 2.0, 3.0, 4.0], total 10.
-        # Cumulative: [0..1), [1..3), [3..6), [6..10).
+        # _retrieve uses np.greater (strict >), so intervals are right-closed:
+        # [0, 1], (1, 3], (3, 6], (6, 10]. A query exactly on a boundary goes left.
         for v in [1.0, 2.0, 3.0, 4.0]:
             st.append(v)
         query = np.array([0.5, 1.5, 4.0, 7.0], dtype=np.float32)
         prios, data_idxs, tree_idxs = st.find(query)
         # Each query should land in the leaf whose interval contains it.
-        # data_idxs are in [0, size).
-        assert data_idxs[0] == 0  # 0.5 ∈ [0, 1)
-        assert data_idxs[1] == 1  # 1.5 ∈ [1, 3)
-        assert data_idxs[2] == 2  # 4.0 ∈ [3, 6)
-        assert data_idxs[3] == 3  # 7.0 ∈ [6, 10)
+        assert data_idxs[0] == 0  # 0.5 ∈ [0, 1]
+        assert data_idxs[1] == 1  # 1.5 ∈ (1, 3]
+        assert data_idxs[2] == 2  # 4.0 ∈ (3, 6]
+        assert data_idxs[3] == 3  # 7.0 ∈ (6, 10]
         # Returned priorities should equal the leaf values.
         assert np.allclose(prios, [1.0, 2.0, 3.0, 4.0])
 
@@ -235,7 +235,7 @@ class TestPER:
         per = self._make_per(size=64, n=3)
         state = _random_stack()
         n_state = _random_stack()
-        for i in range(20):
+        for _ in range(20):
             per.append(state, action=0, reward=0.1, n_state=n_state, done=False, trun=False, stream=0)
         _, states, *_ = per.sample(4)
         assert states.dtype == torch.float32
@@ -259,7 +259,7 @@ class TestPER:
         per.update_priorities(np.array([boosted]), np.array([1e10]))
 
         trials = 20
-        for _ in range(trials):
+        for _trial in range(trials):
             tree_idxs, *_ = per.sample(4)
             assert boosted in tree_idxs
 
@@ -267,7 +267,7 @@ class TestPER:
         per = self._make_per(size=32, n=3)
         state = _random_stack()
         n_state = _random_stack()
-        for i in range(10):
+        for _ in range(10):
             per.append(state, action=0, reward=1.0, n_state=n_state, done=False, trun=False, stream=0)
         # Episode ends.
         per.append(state, action=0, reward=1.0, n_state=n_state, done=True, trun=False, stream=0)
