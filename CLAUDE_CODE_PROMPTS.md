@@ -44,19 +44,42 @@ Prompts 2a (BC model), 2b (BC training loop with TBPTT), 2c (BC eval) all shippe
 
 ---
 
-## Prompt 3 — Fork VIPTankz env into `src/mkw_rl/env/`
+## Prompt 3 — Fork VIPTankz env into `src/mkw_rl/env/` + implement v2 methodology
 
-**Depends on: P-1 passed, submodule SHA pinned to real value.**
+**Depends on: P-1 passed, submodule SHA pinned to real value, `data/track_metadata.yaml` populated with at least Luigi Circuit's WR time (others can be filled in incrementally).**
 
-> Re-read MKW_RL_SPEC.md §4 (renumbered to current Phase 2 per `docs/PIVOT_2026-04-17.md`) and `docs/REGION_DECISION.md`. Fork `third_party/Wii-RL/DolphinEnv.py` → `src/mkw_rl/env/dolphin_env.py` and `third_party/Wii-RL/DolphinScript.py` → `src/mkw_rl/env/dolphin_script.py`. Preserve VIPTankz's PAL RAM pointers (`0x809BD730`, `0x809C18F8`, `0x809C3618`) verbatim — do not re-derive. Port the reward function as-is (progress + position). Adapt the env class to: (a) use our logging conventions (standard `logging` module, not prints where avoidable), (b) accept a savestate directory pointing at `data/savestates/` so we can load any track's savestate by track slug, (c) extend `reset()` with a `track_slug` argument (optional; if None, sample uniformly from available savestates) that loads the corresponding savestate, (d) remain gymnasium-compliant. Observation space: `Box(0, 255, shape=(4, 75, 140), dtype=uint8)` per VIPTankz. Action space: `Discrete(40)` per VIPTankz. Write `tests/test_env_smoke.py` that verifies the env instantiates without Dolphin running (unit-testable parts only) — the full integration test requires a live Dolphin and is human-driven. Commit as "phase 2.1: env fork".
+> Re-read MKW_RL_SPEC.md, `docs/PIVOT_2026-04-17.md`, `docs/TRAINING_METHODOLOGY.md`, and `docs/REGION_DECISION.md`. Fork `third_party/Wii-RL/DolphinEnv.py` → `src/mkw_rl/env/dolphin_env.py` and `third_party/Wii-RL/DolphinScript.py` → `src/mkw_rl/env/dolphin_script.py`. Preserve VIPTankz's PAL RAM pointers (`0x809BD730`, `0x809C18F8`, `0x809C3618`) verbatim — do not re-derive.
+>
+> **Apply the v2 methodology from `docs/TRAINING_METHODOLOGY.md`** — VIPTankz's published code is the v1 variant that failed on 19/32 tracks; we need the v2 changes:
+>
+> 1. **Variable checkpoints per track**: implement `src/mkw_rl/env/reward.py::checkpoint_count_for_track(slug)` returning `round(100 × wr_seconds / 60)`, reading from `data/track_metadata.yaml`. Do NOT hardcode 200.
+> 2. **Reward function** per `TRAINING_METHODOLOGY.md` §5: variable-checkpoint × speed-bonus, off-road penalty (small), wall penalty (larger), finish bonus (large), position bonus (small), plus VIPTankz's existing progress shaping between checkpoints. Each component logged separately (`reward/checkpoint`, `reward/offroad`, `reward/wall`, `reward/finish`, `reward/position`).
+> 3. **Lenient reset threshold**: episode terminates ONLY when the agent fails to make ≥1s of forward progress within a 15s window. No termination on edge-fall or wall-contact — those are reward penalties. Implement as a progress tracker reading the existing VIPTankz RAM reads.
+> 4. **Track-slug reset interface**: `env.reset(track_slug=None)` loads the corresponding savestate from `data/savestates/<slug>.sav`. If `track_slug` is None, the caller (not the env) is expected to have sampled one via the progress-weighted sampler — env is dumb w.r.t. curriculum.
+> 5. Adapt to our conventions: `logging` module not prints; gymnasium-compliant. Observation space: `Box(0, 255, shape=(4, 75, 140), dtype=uint8)`. Action space: `Discrete(40)`.
+>
+> Write `tests/test_env_smoke.py` covering: env instantiates offline (no Dolphin); `checkpoint_count_for_track` returns sensible values for known tracks; reward components sum correctly given hand-constructed RAM state; reset-threshold logic fires only under the right conditions. Full integration test (with live Dolphin) is human-driven, not in CI.
+>
+> Commit as "phase 2.1: env fork + v2 reward + lenient reset".
 
 ---
 
-## Prompt 4 — Fork BTR into `src/mkw_rl/rl/`
+## Prompt 4 — Fork BTR into `src/mkw_rl/rl/` + add LSTM + progress-weighted sampler
 
-**Depends on: Prompt 3 done, user has at least one savestate recorded (Luigi Circuit minimum for smoke testing).**
+**Depends on: Prompt 3 done; user has at least 3 savestates recorded (Luigi Circuit + two contrasting tracks for first multi-track smoke).**
 
-> Re-read MKW_RL_SPEC.md and `docs/PIVOT_2026-04-17.md`. Fork `third_party/Wii-RL/BTR.py` → `src/mkw_rl/rl/btr.py`. Keep the `FactorizedNoisyLinear`, `Dueling`, `ImpalaCNNLargeIQN`, `PER` / `SumTree`, and `Agent` classes verbatim (these are the validated BTR implementation). Extract the `main()` training loop into `scripts/train_btr.py` and replace hardcoded config with a `configs/btr.yaml` that mirrors VIPTankz's defaults (batch size 256, lr 1e-4, discount 0.997, n-step 3, per_alpha 0.2, target replace 500, spectral norm on for CUDA / off for MPS, eps_steps 2M, framestack 4, input 75×140). Wire logging to wandb if `WANDB_API_KEY` is set else CSV to `runs/btr/metrics.csv`. **Critical multi-track change**: modify the rollout loop so each `env.reset()` samples a random track_slug from available savestates. Log per-track episode rewards as separate wandb metrics (`track/{slug}/episode_reward`) so we can spot stalled tracks. Add a `tests/test_btr_smoke.py` that runs 100 random-action steps through a mocked-env stub and verifies the PER sample/update path works. Commit as "phase 2.2: BTR fork".
+> Re-read MKW_RL_SPEC.md, `docs/PIVOT_2026-04-17.md`, and `docs/TRAINING_METHODOLOGY.md`. Fork `third_party/Wii-RL/BTR.py` → `src/mkw_rl/rl/btr.py`. Keep `FactorizedNoisyLinear`, `Dueling`, `PER`, `SumTree`, and the Munchausen/IQN loss math verbatim — these are the validated BTR components. But **the architecture and training loop need two material changes from v1**:
+>
+> 1. **Add LSTM on top of the IMPALA encoder** per `docs/TRAINING_METHODOLOGY.md` §2. v1's BTR is frame-stack-only; v2 (which succeeded) added LSTM. Reuse the `ImpalaEncoder` and LSTM pattern from our existing BC model (`src/mkw_rl/bc/model.py`) — do NOT reimplement. The flow is: `(B, T, 4, 75, 140) → ImpalaEncoder per-timestep → LSTM → IQN dueling heads → Q-values over 40 actions`. The IQN head wraps the LSTM output, not the raw encoder output.
+> 2. **Recurrent replay**: modify `PER` to sample burn-in-prefixed sequences (R2D2 pattern) — default burn-in 20 frames + 40 frames of learning window. The LSTM state at the start of the learning window is derived by forwarding through the burn-in; the burn-in frames do not contribute to the loss. If this complicates PER too much, fall back to storing LSTM hidden states at sequence boundaries and loading them at sample time; document the choice.
+>
+> Implement the **progress-weighted track sampler** at `src/mkw_rl/rl/track_sampler.py` per `docs/TRAINING_METHODOLOGY.md` §4. Exposes `sampler.sample()` which the rollout loop calls before each `env.reset(track_slug=...)`. Maintains EMA of episode reward per track; sampling weight ∝ `max_progress_across_tracks - track_progress + epsilon`. Log `track_sampler/{slug}/weight` per update.
+>
+> Extract the training loop into `scripts/train_btr.py`. Config via `configs/btr.yaml` mirroring VIPTankz's hyperparameters where they still apply (batch 256, lr 1e-4, discount 0.997, n-step 3, per_alpha 0.2, target replace 500, eps_steps 2M, framestack 4, input 75×140) plus new ones: `lstm_hidden: 512`, `lstm_layers: 1`, `burn_in_len: 20`, `learning_seq_len: 40`, `spectral: off` on MPS / `on` on CUDA. Wire logging to wandb if `WANDB_API_KEY` is set else CSV to `runs/btr/metrics.csv`. Log per-track episode rewards (`track/{slug}/episode_reward`) and per-component reward signals (`reward/*`) so we can diagnose each track separately.
+>
+> `tests/test_btr_smoke.py`: 100 random-action steps through a mocked-env stub, verify PER sample/update path works with the recurrent sequences, verify the track sampler distribution concentrates on low-progress tracks.
+>
+> Commit as "phase 2.2: BTR fork with LSTM + recurrent replay + progress-weighted sampler".
 
 ---
 

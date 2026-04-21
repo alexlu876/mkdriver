@@ -1,0 +1,94 @@
+# Training methodology
+
+Concrete design decisions for our track-agnostic multi-track BTR training. Each decision is attributed to the source that justified it.
+
+## Source material
+
+Two YouTube videos by AI-Tango (the author of VIPTankz/Wii-RL and the BTR paper):
+
+- **v1 (3-week attempt, 19/32 tracks incomplete)**: `youtube.com/watch?v=6OofM-Q3dGA`. Initial multi-track attempt. Uses their published `BTR.py` architecture (IMPALA + IQN + Noisy + Dueling + PER, frame-stack only, no recurrence). Fails on Rainbow Road and Bowser's Castle variants.
+- **v2 (500-hour attempt, podium on all 32 tracks)**: `youtube.com/watch?v=aLw43abG-NA` — the breakthrough run. Same BTR core but with five specific changes that collectively made the policy generalize to every track.
+
+**Key context for our project**: the v2 architecture and training-loop changes are **not in VIPTankz's published `BTR.py`**, which corresponds to v1 / single-track. Forking their code verbatim gives us the inferior algorithm. We implement the v2 changes on top.
+
+## Five load-bearing design choices
+
+### 1. Variable checkpoints per track, scaled by world-record time
+
+**What**: each track gets `round(100 × WR_time_minutes)` checkpoints per lap, where `WR_time_minutes` is the no-glitch world-record time for that track. Not 200 for every track.
+
+**Why** (v2 video, ~3:00): v1 used a fixed 200 checkpoints per lap on every track. Short tracks like Luigi Circuit got dense reward signal; long tracks like GBA Bowser's Castle 3 got the same count spread over far more geometry, so the reward signal was much sparser on long tracks. Sparser reward → harder learning → v1's observed failure on long tracks.
+
+**Implementation hook**:
+- `data/track_metadata.yaml` (new) — lookup table keyed by track slug, with `wr_seconds_no_glitch` for each of the 32 vanilla tracks. Source values from `speedrun.com/mkwii` leaderboards, no-glitch category. User curates this file.
+- `src/mkw_rl/env/reward.py` (new) — `checkpoint_count_for_track(slug)` function returns `round(100 * wr_seconds / 60)`. Checkpoint placement itself is whatever scheme VIPTankz's `DolphinScript.py` uses (course-geometry-based); only the count changes.
+
+### 2. LSTM on top of IMPALA encoder — not frame-stack-only BTR
+
+**What**: architecture is `(B, T, 4, 75, 140) → IMPALA CNN per-timestep → LSTM (hidden=512, 1 layer) → IQN dueling heads → Q-values over 40 discrete actions`. The LSTM is between the encoder flatten and the Q-heads.
+
+**Why** (v2 video, ~5:16-6:15): v1 had no memory. When the policy got into a novel state (stuck, facing backward, bullet bill active, item just used), the 4-frame stack gave no context about how it got there. LSTM lets the policy remember the last N-step trajectory and recover. v2 author called this "the biggest of all changes."
+
+**Implementation notes**:
+- Our existing `src/mkw_rl/bc/model.py` already implements exactly this encoder+LSTM combination for BC. Reuse the `ImpalaEncoder` and LSTM module verbatim; swap the discrete-action heads for IQN heads from VIPTankz's `BTR.py`.
+- Recurrent DQN with PER is known territory (R2D2 pattern). Replay buffer must either (a) store burn-in sequences long enough for the LSTM to warm up, or (b) store saved LSTM states at trajectory boundaries. We default to (a) with a burn-in length of ~20 frames unless profiling shows otherwise.
+- Consequence for BC-augmentation (future Phase): because BTR now shares IMPALA+LSTM with BC, the warm-start path is clean — load BC's encoder+LSTM weights, swap heads.
+
+### 3. Lenient reset threshold — progress-based, not crash-based
+
+**What**: episode resets only when the agent fails to make ~1 second of forward progress within a 15-second window. **Never** resets on falling off an edge, hitting a wall, or similar events. Those are handled via reward penalty (see #5).
+
+**Why** (v2 video, ~1:10-2:30): v1 reset on any off-edge event. This unfairly biased training against tracks with more edges (Rainbow Road, Bowser's Castle), since an item hit or minor mistake would end the episode immediately and the policy got too few samples of those tracks. Lenient reset + harsh reward penalty gives the same behavioral shaping without the sample-efficiency penalty.
+
+**Implementation hook**:
+- `src/mkw_rl/env/dolphin_env.py` (new) — track progress via last-checkpoint-hit-time. If `current_time - last_checkpoint_time > 15s` AND the net forward progress in that window is < 1s worth of normal driving, issue `done = True` and reset.
+- Edge-fall and wall-contact events become reward modifiers (see #5), not termination signals.
+
+### 4. Progress-weighted track sampler, not uniform random
+
+**What**: after `reset()`, the next track to load is chosen by a weighted formula that biases toward tracks where the agent is making the least progress (not just the least time spent).
+
+**Why** (v2 video, ~4:10-5:00): v1 sampled tracks by "least time played." That sounds balanced but creates a vicious cycle: if the agent is bad at track X, it keeps resetting quickly there, accumulating less wall-clock time on X, so it gets sent back to X often — but the short episodes give too little learning signal per attempt. Better signal comes from weighting on _progress per attempt_: force the agent to stay on tracks where its episode reward is plateaued-low.
+
+**Implementation hook**:
+- `src/mkw_rl/rl/track_sampler.py` (new) — maintains an EMA of episode reward per track. Sampling weight per track ∝ `(max_progress_across_tracks - track_progress + epsilon)`. After the agent "solves" a track (progress ≥ some fraction of best), its weight drops to baseline and the sampler redistributes to harder tracks.
+- Log the current per-track sampling distribution as wandb metric `track_sampler/{slug}/weight` so we can watch the curriculum evolve.
+
+### 5. Reward function: variable checkpoints + finish bonus + off-road/wall penalty
+
+**What**, additive per frame:
+
+| Component | Value | Notes |
+|---|---|---|
+| Checkpoint-hit reward | `base × speed_bonus` | `base = 1.0 / N_checkpoints_for_track`, `speed_bonus` = multiplier rewarding fast checkpoint hits. Normalizes so total per-lap checkpoint reward is ~constant across tracks. |
+| Off-road penalty | `-c_offroad` per frame while off-road | Small. Tune so that intentional shortcuts through off-road (with a mushroom) are still net positive. |
+| Wall-contact penalty | `-c_wall` per frame on wall | Larger. |
+| Finish bonus | `+R_finish` on race completion | Large. |
+| Position bonus | `+R_pos × (n_racers - finishing_pos)` | Much smaller than `R_finish`. |
+| Progress-based shaping (VIPTankz's existing) | retained | Keeps dense signal between checkpoints. |
+
+**Why** (v1 video ~1:35 for checkpoint/speed shape; v2 video ~9:00-10:20 for penalty structure): v1 made off-edge a hard reset; v2 converts all of "agent did a bad thing" into reward-level signals so the agent can recover and keep learning in-episode. The "small penalty for off-road" on Shy Guy Beach even led the v1 AI to _learn_ that mushrooms eliminate the penalty when going over water — an emergent strategy. Keep that emergent-learning property.
+
+**Implementation hook**:
+- `src/mkw_rl/env/reward.py::compute_reward(state, prev_state, track_meta)` returns a scalar per frame.
+- Reward component breakdown logged separately to wandb (`reward/checkpoint`, `reward/offroad`, `reward/finish`, `reward/position`) so we can diagnose shaping issues.
+
+## Other v2 observations worth preserving
+
+These are not primary design levers but context we want on hand during training review:
+
+- **Item-use policy is hard to learn**. v2 at the end was still confused by item chaos. Expect our policy to look "sloppy" even when scoring well; this is normal.
+- **Backward driving can be rewarded**. If off-road/wall penalties are tuned too punitive relative to checkpoint signal, the policy sometimes prefers driving backward (avoiding walls) over hitting checkpoints. Sanity-check by watching episode video at 150M+ steps.
+- **Bullet Bill is over-used early**. v2 policy tried to activate bullet bill mid-spin-up, wasting it. Not a design problem; just noise.
+- **Blooper is the hardest single item for vision-based policy.** Screen obscurement breaks the image encoder's state representation in ways the human player doesn't experience. Consider logging per-blooper-event rewards to quantify the hit.
+- **Gap-jump shortcuts are emergent**. v1's policy attempted Mushroom Gorge's Gap Jump unprompted. Take this as signal that reward shaping is not destroying exploration.
+- **Plateau timing**: v2 trained 500 hours / ~700M frames and was still improving at the end — likely room for much longer runs. For us, target first checkpoint review at ~5M env steps (early signal), second at ~50M (meaningful policy quality), third at ~500M (approaching v2 scale).
+- **Hard-track sample share**: v2 spent ~80% of late training on Rainbow Road alone due to the progress-weighted sampler. Budget for this — it's not a bug.
+
+## Open questions / deferred
+
+- **Exact speed_bonus curve**. v2 video shows it's "reward scales with speed of hitting checkpoint" but doesn't publish the formula. Start with linear (`1.0 + α × (1 - elapsed_since_last_checkpoint / expected_gap)`, clamped) and iterate.
+- **Per-track reward normalization**. If some tracks end up dominating gradient even after variable checkpoints, consider z-scoring per-track returns before feeding into BTR's loss.
+- **LSTM state at replay time**. Start with burn-in approach. If memory footprint is a problem, fall back to stored-hidden-state approach (R2D2 style).
+- **World record times to populate `data/track_metadata.yaml`.** User task. No-glitch category on speedrun.com/mkwii.
+- **Retro Rewind tracks reward function**. Out of scope (region conflict anyway — see `docs/REGION_DECISION.md`).

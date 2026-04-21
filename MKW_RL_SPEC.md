@@ -40,8 +40,8 @@ Do not revisit these without explicit user approval.
 - **Recording discipline** (dormant): `.dtm` is always recorded with frame dumping *disabled*, then replayed with frame dumping *enabled* to produce paired frames. Never record with both at once. See §1.2. Applies only to the BC-augmentation future work.
 - **Pairing direction** (dormant): alignment from the start of the savestate anchor, with `skip_first_n` for menu/countdown frames and tail-trimming for stop-recording ragged edge. See §1.3. Applies only to the BC-augmentation future work.
 - **Policy architecture**:
-  - **Active path (BTR)**: IMPALA-style CNN encoder + IQN/Munchausen/PER/NoisyNet stack per VIPTankz's `BTR.py`. Frame stack only, no recurrence. Discrete 40-way action space per VIPTankz. See §4 (renumbered from previous v1 spec).
-  - **Dormant path (BC)**: same IMPALA encoder + stateful LSTM + discretized 21-bin steering + per-button binary heads. See §2.2. Shares the encoder with BTR so a future BC-to-BTR warm-start is possible.
+  - **Active path (BTR)**: IMPALA-style CNN encoder + **stateful LSTM (hidden=512, 1 layer)** + IQN/Munchausen/PER/NoisyNet dueling heads. Discrete 40-way action space per VIPTankz. LSTM is added on top of VIPTankz's published frame-stack-only `BTR.py` because v2 methodology (see `docs/TRAINING_METHODOLOGY.md` §2) identified LSTM as the single biggest change that made multi-track generalization work. Replay uses burn-in-prefixed sequences (R2D2 pattern). See §4 and `docs/TRAINING_METHODOLOGY.md`.
+  - **Dormant path (BC)**: same IMPALA encoder + stateful LSTM + discretized 21-bin steering + per-button binary heads. See §2.2. Shares the encoder + LSTM with BTR so a future BC-to-BTR warm-start is direct (load encoder+LSTM weights, swap only the heads).
 - **Compute**: M4 Mac Mini (16GB) for code iteration, small smoke tests (Luigi Circuit only), and local multi-env debugging. **Vast.ai (RTX 4090 class) for real training runs** — committed upfront given the track-agnostic multi-track scope. Do not assume a local GPU for anything beyond smoke tests.
 
 ---
