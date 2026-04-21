@@ -32,7 +32,8 @@ Two YouTube videos by AI-Tango (the author of VIPTankz/Wii-RL and the BTR paper)
 **Implementation notes**:
 - Our existing `src/mkw_rl/bc/model.py` already implements exactly this encoder+LSTM combination for BC. Reuse the `ImpalaEncoder` and LSTM module verbatim; swap the discrete-action heads for IQN heads from VIPTankz's `BTR.py`.
 - Recurrent DQN with PER is known territory (R2D2 pattern). Replay buffer must either (a) store burn-in sequences long enough for the LSTM to warm up, or (b) store saved LSTM states at trajectory boundaries. We default to (a) with a burn-in length of ~20 frames unless profiling shows otherwise.
-- Consequence for BC-augmentation (future Phase): because BTR now shares IMPALA+LSTM with BC, the warm-start path is clean — load BC's encoder+LSTM weights, swap heads.
+- **Action-space note**: BC uses 21-bin steering + 4 binary button heads (a supervised-learning choice for matching `.dtm` controller states); BTR uses `Discrete(40)` (VIPTankz's pre-enumerated action set in `DolphinEnv.py:94`). These are independent design choices — the warm-start transfers **only the encoder+LSTM weights**, not the heads. No attempt is made to map the 21-bin steering space into the 40-action space.
+- Consequence for BC-augmentation (future Phase): because BTR shares encoder+LSTM with BC, the warm-start path is clean — load BC's encoder+LSTM weights, leave the IQN heads randomly initialized (or pretrain them separately).
 
 ### 3. Lenient reset threshold — progress-based, not crash-based
 
