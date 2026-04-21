@@ -124,6 +124,23 @@ class MkwDolphinEnv(gym.Env):
         env["MKW_RL_ENV_ID"] = str(self.env_id)
         env["MKW_RL_SRC"] = str(self._mkw_rl_src)
 
+        # Forward our training venv's site-packages so Dolphin's embedded
+        # Python can import numpy, Pillow, etc. (pure-Python deps + C
+        # extensions). Match VIPTankz's shared_site.txt pattern but via
+        # env var rather than a file on disk.
+        import site  # noqa: PLC0415 — local import keeps top-level imports tidy
+        for p in site.getsitepackages() + [site.getusersitepackages()]:
+            if p and "site-packages" in p and Path(p).exists():
+                env["MKW_RL_VENV_SITE_PACKAGES"] = p
+                log.info("[env %d] forwarding site-packages: %s", self.env_id, p)
+                break
+        else:
+            log.warning(
+                "[env %d] no site-packages path found via site.getsitepackages(); "
+                "Dolphin's embedded Python may fail to import numpy",
+                self.env_id,
+            )
+
         cmd = [
             str(inner_binary),
             "--no-python-subinterpreters",
@@ -188,10 +205,14 @@ class MkwDolphinEnv(gym.Env):
         meta_dict = asdict(self.track_metadata[track_slug])
         self._conn.send(("reset", str(savestate_path), meta_dict))
 
-        # TODO(phase 2.1): the slave's reset logic runs in its on_frame callback
-        # a frame later; the first step() will include the first real observation.
-        # For now, return a zero obs so the API contract is satisfied.
-        obs = np.zeros((FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
+        # Slave replies with ("reset_ok", initial_obs_bytes) once the savestate
+        # is loaded and the frame stack is primed.
+        msg = self._conn.recv()
+        if not (isinstance(msg, tuple) and msg[0] == "reset_ok"):
+            raise RuntimeError(f"unexpected reset reply from slave: {msg!r}")
+        obs = np.frombuffer(msg[1], dtype=np.uint8).reshape(
+            FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH
+        ).copy()  # copy because frombuffer returns a view into the transient bytes
         info = {"track_slug": track_slug}
         return obs, info
 
@@ -206,22 +227,14 @@ class MkwDolphinEnv(gym.Env):
         self._conn.send(int(action))
         msg = self._conn.recv()
         assert isinstance(msg, tuple) and msg[0] == "step", f"unexpected msg: {msg!r}"
-        _, obs_bytes, reward, done, info = msg
+        # Wire format: ("step", obs_bytes, reward, terminated, truncated, info).
+        _, obs_bytes, reward, terminated, truncated, info = msg
 
-        if obs_bytes is None:
-            obs = np.zeros((FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
-        else:
-            obs = np.frombuffer(obs_bytes, dtype=np.uint8).reshape(
-                FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH
-            )
+        obs = np.frombuffer(obs_bytes, dtype=np.uint8).reshape(
+            FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH
+        ).copy()
         info["track_slug"] = self._current_track_slug
-        # Gym distinguishes terminated (MDP end) from truncated (time limit).
-        # Our reset-threshold path is effectively a truncation; the finish
-        # condition is termination. For phase 1 we surface both as `done` via
-        # `terminated` since we don't yet track which triggered it.
-        # TODO(phase 2.1): slave should flag which condition fired so we
-        # can populate truncated correctly.
-        return obs, reward, bool(done), False, info
+        return obs, reward, bool(terminated), bool(truncated), info
 
     def close(self) -> None:
         if self._conn is not None:

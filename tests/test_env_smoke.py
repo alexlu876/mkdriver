@@ -159,29 +159,29 @@ class TestCheckpointSchedule:
 class TestCheckpointReward:
     def test_no_reward_before_first_threshold(self) -> None:
         t = TrackRewardTracker(_track())
-        rb, done = t.step(_state(race_completion=1.005))  # hasn't crossed 1.01 yet
+        rb, terminated, truncated = t.step(_state(race_completion=1.005))  # hasn't crossed 1.01 yet
         assert rb.checkpoint == 0.0
-        assert not done
+        assert not terminated and not truncated
 
     def test_reward_fires_at_threshold_cross(self) -> None:
         t = TrackRewardTracker(_track())
-        rb, done = t.step(_state(race_completion=1.015))  # crossed 1.01
+        rb, terminated, truncated = t.step(_state(race_completion=1.015))  # crossed 1.01
         assert rb.checkpoint > 0.0
-        assert not done
+        assert not terminated and not truncated
 
     def test_reward_fires_once_per_checkpoint(self) -> None:
         t = TrackRewardTracker(_track())
         # Step past the first checkpoint.
         t.step(_state(race_completion=1.015))
         # Step again at same position — no additional reward.
-        rb, _ = t.step(_state(race_completion=1.015))
+        rb, _, _ = t.step(_state(race_completion=1.015))
         assert rb.checkpoint == 0.0
 
     def test_multiple_checkpoints_in_one_frame(self) -> None:
         """At very high speed, we can cross multiple thresholds between frames."""
         t = TrackRewardTracker(_track())
         initial_idx = t.current_checkpoint
-        rb, _ = t.step(_state(race_completion=1.035))  # crosses 1.01, 1.02, 1.03
+        rb, _, _ = t.step(_state(race_completion=1.035))  # crosses 1.01, 1.02, 1.03
         # Three checkpoints fired and reward is positive (exact value depends
         # on per_hit_base which is normalized by n_checkpoints_per_lap).
         assert t.current_checkpoint == initial_idx + 3
@@ -195,12 +195,12 @@ class TestCheckpointReward:
         t_slow = TrackRewardTracker(_track())
 
         # Fast: crosses first checkpoint after 1 frame.
-        rb_fast, _ = t_fast.step(_state(race_completion=1.015))
+        rb_fast, _, _ = t_fast.step(_state(race_completion=1.015))
 
         # Slow: sit on 1.005 for many frames, then cross.
         for _ in range(t_slow.expected_frames_per_checkpoint):
             t_slow.step(_state(race_completion=1.005))
-        rb_slow, _ = t_slow.step(_state(race_completion=1.015))
+        rb_slow, _, _ = t_slow.step(_state(race_completion=1.015))
 
         assert rb_fast.checkpoint > rb_slow.checkpoint
 
@@ -208,19 +208,19 @@ class TestCheckpointReward:
 class TestPenalties:
     def test_offroad_penalty_applied(self) -> None:
         t = TrackRewardTracker(_track())
-        rb, _ = t.step(_state(race_completion=1.0, touching_offroad=True))
+        rb, _, _ = t.step(_state(race_completion=1.0, touching_offroad=True))
         assert rb.offroad == -RewardConfig().offroad_penalty
 
     def test_offroad_invincibility_exempts_penalty(self) -> None:
         t = TrackRewardTracker(_track())
-        rb, _ = t.step(
+        rb, _, _ = t.step(
             _state(race_completion=1.0, touching_offroad=True, offroad_invincibility=90)
         )
         assert rb.offroad == 0.0
 
     def test_wall_penalty_applied(self) -> None:
         t = TrackRewardTracker(_track())
-        rb, _ = t.step(_state(race_completion=1.0, wall_collide=1))
+        rb, _, _ = t.step(_state(race_completion=1.0, wall_collide=1))
         assert rb.wall == -RewardConfig().wall_penalty
 
     def test_penalty_is_larger_for_wall_than_offroad(self) -> None:
@@ -232,20 +232,21 @@ class TestPenalties:
 class TestFinishBonus:
     def test_finish_fires_once(self) -> None:
         t = TrackRewardTracker(_track())
-        rb1, done1 = t.step(_state(race_completion=4.0, race_position=1))
+        rb1, terminated1, truncated1 = t.step(_state(race_completion=4.0, race_position=1))
         assert rb1.finish == 10.0
         assert rb1.position == 12 * 0.5  # (13 - 1) × 0.5
-        assert done1
+        assert terminated1
+        assert not truncated1
 
-        rb2, _ = t.step(_state(race_completion=4.0, race_position=1))
+        rb2, _, _ = t.step(_state(race_completion=4.0, race_position=1))
         assert rb2.finish == 0.0
         assert rb2.position == 0.0
 
     def test_position_bonus_scales_inversely(self) -> None:
         t1 = TrackRewardTracker(_track())
         t12 = TrackRewardTracker(_track())
-        rb1, _ = t1.step(_state(race_completion=4.0, race_position=1))
-        rb12, _ = t12.step(_state(race_completion=4.0, race_position=12))
+        rb1, _, _ = t1.step(_state(race_completion=4.0, race_position=1))
+        rb12, _, _ = t12.step(_state(race_completion=4.0, race_position=12))
         assert rb1.position > rb12.position
 
 
@@ -253,10 +254,11 @@ class TestResetThreshold:
     def test_reset_fires_after_idle(self) -> None:
         t = TrackRewardTracker(_track(), RewardConfig(reset_threshold_frames=50))
         for _ in range(50):
-            _, done = t.step(_state(race_completion=1.0))
-            assert not done
-        _, done = t.step(_state(race_completion=1.0))
-        assert done
+            _, terminated, truncated = t.step(_state(race_completion=1.0))
+            assert not terminated and not truncated
+        _, terminated, truncated = t.step(_state(race_completion=1.0))
+        # Reset threshold is a truncation (time-limit), not a termination.
+        assert truncated and not terminated
 
     def test_reset_counter_resets_on_checkpoint(self) -> None:
         t = TrackRewardTracker(_track(), RewardConfig(reset_threshold_frames=50))
@@ -267,8 +269,8 @@ class TestResetThreshold:
         t.step(_state(race_completion=1.015))
         # Should be able to go ~50 more frames.
         for _ in range(45):
-            _, done = t.step(_state(race_completion=1.015))
-            assert not done
+            _, terminated, truncated = t.step(_state(race_completion=1.015))
+            assert not terminated and not truncated
 
 
 class TestAlignToState:
@@ -285,19 +287,19 @@ class TestAlignToState:
         t = TrackRewardTracker(_track())
         t.align_to_state(_state(race_completion=1.7))
         # Step at the same race_completion — no new rewards.
-        rb, _ = t.step(_state(race_completion=1.7))
+        rb, _, _ = t.step(_state(race_completion=1.7))
         assert rb.checkpoint == 0.0
 
 
 class TestRewardBreakdown:
     def test_total_is_sum(self) -> None:
         t = TrackRewardTracker(_track())
-        rb, _ = t.step(
+        rb, _, _ = t.step(
             _state(race_completion=1.015, touching_offroad=True, wall_collide=1)
         )
         assert rb.total == pytest.approx(rb.checkpoint + rb.offroad + rb.wall)
 
     def test_as_dict_has_expected_keys(self) -> None:
-        rb, _ = TrackRewardTracker(_track()).step(_state())
+        rb, _, _ = TrackRewardTracker(_track()).step(_state())
         d = rb.as_dict()
         assert set(d) == {"checkpoint", "offroad", "wall", "finish", "position", "total"}

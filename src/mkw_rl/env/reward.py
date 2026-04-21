@@ -167,10 +167,18 @@ class TrackRewardTracker:
         while state.race_completion > self.checkpoints[self.current_checkpoint]:
             self.current_checkpoint += 1
 
-    def step(self, state: RaceState) -> tuple[RewardBreakdown, bool]:
-        """Advance one frame. Returns (reward breakdown, done)."""
+    def step(self, state: RaceState) -> tuple[RewardBreakdown, bool, bool]:
+        """Advance one frame. Returns (reward breakdown, terminated, truncated).
+
+        terminated: MDP-end condition (finish line crossed) — a true episode end.
+        truncated: time-limit style end (lenient reset fired) — episode cut short
+            by the trainer rather than by the MDP. Gymnasium draws this distinction
+            explicitly; Q-learning targets differ between the two (bootstrap on
+            truncated, don't on terminated).
+        """
         breakdown = RewardBreakdown()
-        done = False
+        terminated = False
+        truncated = False
 
         self.frames_since_checkpoint += 1
 
@@ -197,10 +205,10 @@ class TrackRewardTracker:
             breakdown.finish = self.config.finish_bonus
             breakdown.position = (13 - state.race_position) * self.config.position_bonus_scale
             self._finished = True
-            done = True
+            terminated = True
 
         # Lenient reset — no progress for too long.
-        if self.frames_since_checkpoint > self.config.reset_threshold_frames:
-            done = True
+        if not terminated and self.frames_since_checkpoint > self.config.reset_threshold_frames:
+            truncated = True
 
-        return breakdown, done
+        return breakdown, terminated, truncated
