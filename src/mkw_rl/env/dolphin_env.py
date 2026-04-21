@@ -206,8 +206,23 @@ class MkwDolphinEnv(gym.Env):
         self._conn.send(("reset", str(savestate_path), meta_dict))
 
         # Slave replies with ("reset_ok", initial_obs_bytes) once the savestate
-        # is loaded and the frame stack is primed.
-        msg = self._conn.recv()
+        # is loaded and the frame stack is primed, or ("reset_err", msg, tb)
+        # if anything went wrong on the slave side (load failure, RAM read
+        # error, etc.). EOFError on recv means the slave crashed / Dolphin
+        # exited — surface as a clear exception rather than letting it
+        # propagate unwrapped.
+        try:
+            msg = self._conn.recv()
+        except EOFError as exc:
+            raise RuntimeError(
+                f"slave closed connection during reset (track_slug={track_slug!r}) — "
+                "Dolphin likely crashed; check its log"
+            ) from exc
+        if isinstance(msg, tuple) and msg[0] == "reset_err":
+            raise RuntimeError(
+                f"slave failed to reset (track_slug={track_slug!r}): {msg[1]}\n"
+                f"slave traceback:\n{msg[2]}"
+            )
         if not (isinstance(msg, tuple) and msg[0] == "reset_ok"):
             raise RuntimeError(f"unexpected reset reply from slave: {msg!r}")
         obs = np.frombuffer(msg[1], dtype=np.uint8).reshape(
@@ -251,6 +266,9 @@ class MkwDolphinEnv(gym.Env):
             except subprocess.TimeoutExpired:
                 self._process.kill()
             self._process = None
+        # Clear episode-scoped state so a reuse doesn't leak stale slug into
+        # info dicts (reuse currently unused in practice; guarding for safety).
+        self._current_track_slug = None
 
     # Gym idioms.
     def __enter__(self) -> "MkwDolphinEnv":

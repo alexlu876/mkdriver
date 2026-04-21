@@ -117,7 +117,12 @@ def _read_race_state(addrs: _Addresses) -> RaceState:
     return RaceState(
         race_completion=memory.read_f32(addrs.race_completion),
         current_lap=memory.read_u16(addrs.current_lap),
-        race_stage=memory.read_u8(addrs.stage),
+        # stage is a u32 in memory (VIPTankz DolphinScript.py:251 reads u32).
+        # Wii is big-endian PowerPC, so a stage value of 3 is laid out as
+        # `00 00 00 03` in memory; reading the first byte (u8) returns 0
+        # for any plausible stage value 0-4. The live smoke test exposed
+        # this as "stage=0 throughout a running race".
+        race_stage=memory.read_u32(addrs.stage),
         race_position=memory.read_u8(addrs.race_position),
         touching_offroad=touching_offroad,
         wall_collide=memory.read_u32(addrs.wall_collide),
@@ -202,22 +207,30 @@ while True:
 
     if isinstance(msg, tuple) and msg[0] == "reset":
         savestate_path, track_meta_dict = msg[1], msg[2]
-        savestate.load_from_file(savestate_path)
-        # Wait a few frames for the load to settle (VIPTankz:594-600 does the same).
-        for _ in range(3):
-            await event.frameadvance()
+        try:
+            savestate.load_from_file(savestate_path)
+            # Wait a few frames for the load to settle (VIPTankz:594-600 does the same).
+            for _ in range(3):
+                await event.frameadvance()
 
-        addrs = _Addresses()
-        meta = TrackMetadata(**track_meta_dict)
-        tracker = TrackRewardTracker(track_meta=meta, config=RewardConfig())
-        state = _read_race_state(addrs)
-        tracker.align_to_state(state)
+            addrs = _Addresses()
+            meta = TrackMetadata(**track_meta_dict)
+            tracker = TrackRewardTracker(track_meta=meta, config=RewardConfig())
+            state = _read_race_state(addrs)
+            tracker.align_to_state(state)
 
-        # Grab an initial frame and fill the stack with copies of it.
-        (w, h, data) = await event.framedrawn()
-        first_img = _process_frame(data, w, h)
-        for i in range(FRAME_STACK):
-            frame_stack[i] = first_img
+            # Grab an initial frame and fill the stack with copies of it.
+            (w, h, data) = await event.framedrawn()
+            first_img = _process_frame(data, w, h)
+            for i in range(FRAME_STACK):
+                frame_stack[i] = first_img
+        except Exception as exc:  # noqa: BLE001 — surface any reset failure to master
+            import traceback
+            conn.send(("reset_err", f"{type(exc).__name__}: {exc}", traceback.format_exc()))
+            # Clear state so subsequent steps error cleanly.
+            addrs = None
+            tracker = None
+            continue
 
         last_action = 0
         conn.send(("reset_ok", frame_stack.tobytes()))

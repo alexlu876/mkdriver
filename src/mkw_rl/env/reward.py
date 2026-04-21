@@ -75,7 +75,14 @@ class RaceState:
 
     race_completion: float  # 1.0 → 4.0 over 3 laps per VIPTankz
     current_lap: int
-    race_stage: int  # 0=countdown, 3=race, 4=finished (VIPTankz's coding)
+    # Stored as u32 in game memory (must be read via memory.read_u32 — see
+    # dolphin_script.py:_read_race_state). VIPTankz only ever branches on
+    # ``stage == 4`` meaning "race ended"; other values (0, 1, 2, 3) are
+    # inferred from community RE to correspond to pre-race states +
+    # active racing, but VIPTankz's code doesn't rely on them and neither
+    # do we — our reward function uses ``race_completion`` for progression
+    # and ``race_completion >= 4.0`` for finish detection.
+    race_stage: int
     race_position: int  # 1-12 finishing order
     touching_offroad: bool
     wall_collide: int  # non-zero = touching wall
