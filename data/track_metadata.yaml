@@ -1,0 +1,271 @@
+# Per-track metadata for the multi-track MKWii BTR training.
+#
+# The reward function reads this file at env construction time; see
+# docs/TRAINING_METHODOLOGY.md §1 for the formula
+# (n_checkpoints_per_lap = round(100 × wr_seconds / 60)).
+#
+# WR source: speedrun.com/mkwii, 2026-04-21 snapshot. For each track,
+# we prefer the "no glitch" world-record time; for tracks without a
+# published no-glitch WR we fall back to the "current" (with shortcut)
+# WR and mark the category explicitly so we can audit later.
+#
+# wr_category values:
+#   non_glitch — standard no-glitch leaderboard WR (preferred).
+#   shortcut   — with-shortcut WR; used only because no non-glitch
+#                WR was published on speedrun.com at snapshot time.
+#                Typically short by ~30-60% vs. a non-glitch lap.
+#                Tracks marked shortcut should be treated with some
+#                caution — the checkpoint count may under-reward
+#                non-shortcut driving. Revisit if training plateaus
+#                on these specifically.
+#
+# Tracks are grouped by cup in game order. Slugs use lowercase with
+# underscores and the _tt suffix per docs/SAVESTATE_PROTOCOL.md.
+
+# -----------------------------------------------------------------
+# Nitro tracks
+# -----------------------------------------------------------------
+
+# --- Mushroom Cup ---
+
+luigi_circuit_tt:
+  name: "Luigi Circuit"
+  cup: mushroom
+  wr_seconds: 68.733
+  wr_category: non_glitch
+  laps: 3
+
+moo_moo_meadows_tt:
+  name: "Moo Moo Meadows"
+  cup: mushroom
+  wr_seconds: 75.273
+  wr_category: shortcut
+  laps: 3
+
+mushroom_gorge_tt:
+  name: "Mushroom Gorge"
+  cup: mushroom
+  wr_seconds: 93.862
+  wr_category: non_glitch
+  laps: 3
+
+toads_factory_tt:
+  name: "Toad's Factory"
+  cup: mushroom
+  wr_seconds: 109.039
+  wr_category: non_glitch
+  laps: 3
+
+# --- Flower Cup ---
+
+mario_circuit_tt:
+  name: "Mario Circuit"
+  cup: flower
+  wr_seconds: 80.357
+  wr_category: non_glitch
+  laps: 3
+
+coconut_mall_tt:
+  name: "Coconut Mall"
+  cup: flower
+  wr_seconds: 115.250
+  wr_category: non_glitch
+  laps: 3
+
+dks_snowboard_cross_tt:
+  name: "DK's Snowboard Cross"
+  cup: flower
+  wr_seconds: 104.497
+  wr_category: shortcut
+  laps: 3
+
+warios_gold_mine_tt:
+  name: "Wario's Gold Mine"
+  cup: flower
+  wr_seconds: 109.886
+  wr_category: non_glitch
+  laps: 3
+
+# --- Star Cup ---
+
+daisy_circuit_tt:
+  name: "Daisy Circuit"
+  cup: star
+  wr_seconds: 88.321
+  wr_category: non_glitch
+  laps: 3
+
+koopa_cape_tt:
+  name: "Koopa Cape"
+  cup: star
+  wr_seconds: 137.109
+  wr_category: non_glitch
+  laps: 3
+
+maple_treeway_tt:
+  name: "Maple Treeway"
+  cup: star
+  wr_seconds: 133.126
+  wr_category: non_glitch
+  laps: 3
+
+grumble_volcano_tt:
+  name: "Grumble Volcano"
+  cup: star
+  wr_seconds: 110.877
+  wr_category: non_glitch
+  laps: 3
+
+# --- Special Cup ---
+
+dry_dry_ruins_tt:
+  name: "Dry Dry Ruins"
+  cup: special
+  wr_seconds: 106.400
+  wr_category: shortcut
+  laps: 3
+
+moonview_highway_tt:
+  name: "Moonview Highway"
+  cup: special
+  wr_seconds: 102.713
+  wr_category: shortcut
+  laps: 3
+
+bowsers_castle_tt:
+  name: "Bowser's Castle"
+  cup: special
+  wr_seconds: 139.883
+  wr_category: non_glitch
+  laps: 3
+
+rainbow_road_tt:
+  name: "Rainbow Road"
+  cup: special
+  wr_seconds: 144.281
+  wr_category: non_glitch
+  laps: 3
+
+# -----------------------------------------------------------------
+# Retro tracks
+# -----------------------------------------------------------------
+
+# --- Shell Cup ---
+
+gcn_peach_beach_tt:
+  name: "GCN Peach Beach"
+  cup: shell
+  wr_seconds: 72.656
+  wr_category: non_glitch
+  laps: 3
+
+ds_yoshi_falls_tt:
+  name: "DS Yoshi Falls"
+  cup: shell
+  wr_seconds: 58.631
+  wr_category: shortcut
+  laps: 3
+
+snes_ghost_valley_2_tt:
+  name: "SNES Ghost Valley 2"
+  cup: shell
+  wr_seconds: 52.682
+  wr_category: non_glitch
+  laps: 3
+
+n64_mario_raceway_tt:
+  name: "N64 Mario Raceway"
+  cup: shell
+  wr_seconds: 101.193
+  wr_category: shortcut
+  laps: 3
+
+# --- Banana Cup ---
+
+n64_sherbet_land_tt:
+  name: "N64 Sherbet Land"
+  cup: banana
+  wr_seconds: 123.576
+  wr_category: non_glitch
+  laps: 3
+
+gba_shy_guy_beach_tt:
+  name: "GBA Shy Guy Beach"
+  cup: banana
+  wr_seconds: 81.363
+  wr_category: non_glitch
+  laps: 3
+
+ds_delfino_square_tt:
+  name: "DS Delfino Square"
+  cup: banana
+  wr_seconds: 123.525
+  wr_category: shortcut
+  laps: 3
+
+gcn_waluigi_stadium_tt:
+  name: "GCN Waluigi Stadium"
+  cup: banana
+  wr_seconds: 107.732
+  wr_category: non_glitch
+  laps: 3
+
+# --- Leaf Cup ---
+
+ds_desert_hills_tt:
+  name: "DS Desert Hills"
+  cup: leaf
+  wr_seconds: 94.237
+  wr_category: non_glitch
+  laps: 3
+
+gba_bowser_castle_3_tt:
+  name: "GBA Bowser Castle 3"
+  cup: leaf
+  wr_seconds: 136.124
+  wr_category: non_glitch
+  laps: 3
+
+n64_dks_jungle_parkway_tt:
+  name: "N64 DK's Jungle Parkway"
+  cup: leaf
+  wr_seconds: 130.546
+  wr_category: non_glitch
+  laps: 3
+
+gcn_mario_circuit_tt:
+  name: "GCN Mario Circuit"
+  cup: leaf
+  wr_seconds: 90.272
+  wr_category: non_glitch
+  laps: 3
+
+# --- Lightning Cup ---
+
+snes_mario_circuit_3_tt:
+  name: "SNES Mario Circuit 3"
+  cup: lightning
+  wr_seconds: 77.789
+  wr_category: shortcut
+  laps: 3
+
+ds_peach_gardens_tt:
+  name: "DS Peach Gardens"
+  cup: lightning
+  wr_seconds: 118.890
+  wr_category: shortcut
+  laps: 3
+
+gcn_dk_mountain_tt:
+  name: "GCN DK Mountain"
+  cup: lightning
+  wr_seconds: 124.775
+  wr_category: non_glitch
+  laps: 3
+
+n64_bowsers_castle_tt:
+  name: "N64 Bowser's Castle"
+  cup: lightning
+  wr_seconds: 150.459
+  wr_category: non_glitch
+  laps: 3
