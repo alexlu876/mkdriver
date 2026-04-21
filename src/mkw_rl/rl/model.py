@@ -123,6 +123,14 @@ class BTRPolicy(nn.Module):
         )
 
         # IQN: cosine embedding of τ (BTR.py:199-202, 270-272).
+        # Note on the index range: we use `i ∈ {0..n_cos-1}` to match VIPTankz
+        # verbatim. The canonical IQN formulation (Dabney et al. 2018, eq. 4;
+        # Dopamine, BY571, ku2482 references) uses `i ∈ {1..n_cos}`. The
+        # difference is that i=0 gives `cos(0)=1` for every τ, burning one of
+        # the n_cos basis functions on a DC bias that the subsequent Linear's
+        # bias already provides — a few hundred wasted params out of 4M+.
+        # We keep VIPTankz's convention so hypothetical weight transfer from
+        # their published model would be a direct copy, not a 1-index shift.
         self.register_buffer(
             "_cos_pis",
             torch.tensor(
@@ -177,7 +185,10 @@ class BTRPolicy(nn.Module):
 
         # IQN — sample taus and compute per-quantile Q-values.
         num_tau = self.cfg.num_tau
-        lstm_flat = lstm_out.reshape(B * T, -1)  # (B*T, lstm_hidden)
+        # Use .reshape (not .view) because lstm_out may be non-contiguous after
+        # the cuDNN LSTM kernel on some backends; reshape falls back to copy
+        # when stride doesn't permit a view. Shape: (B*T, lstm_hidden).
+        lstm_flat = lstm_out.reshape(B * T, self.cfg.lstm_hidden)
 
         taus = torch.rand(B * T, num_tau, 1, device=frames.device)
         cos = torch.cos(taus * self._cos_pis)  # (B*T, num_tau, n_cos)

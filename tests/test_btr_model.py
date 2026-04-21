@@ -116,11 +116,10 @@ class TestBTRForwardShapes:
         policy.eval()
         policy.disable_noise()  # determinism for the comparison
         B, T = 1, 2
-        # Use seed to match the two IQN τ samples across runs.
-        torch.manual_seed(42)
         x_uint = torch.randint(0, 256, (B, T, cfg.stack_size, *cfg.input_hw), dtype=torch.uint8)
         x_float = x_uint.float()
         with torch.no_grad():
+            # Seed before each call so the IQN τ draws match.
             torch.manual_seed(0)
             q_u, _ = policy.q_values(x_uint)
             torch.manual_seed(0)
@@ -196,7 +195,13 @@ class TestNoise:
         assert torch.equal(q1, q2)
 
     def test_reset_noise_changes_output(self) -> None:
-        """With noise enabled, two forwards with different ε should differ."""
+        """With noise enabled, two forwards with different ε should differ.
+
+        Ordering note: we seed the RNG before reset_noise() (which consumes
+        entropy drawing ε), then re-seed for the τ sampling inside forward()
+        so that only the noise differs between the two runs. If you reorder
+        these manual_seed calls the invariant breaks silently.
+        """
         cfg = _tiny_cfg()
         policy = BTRPolicy(cfg)
         policy.eval()
