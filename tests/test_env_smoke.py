@@ -180,9 +180,13 @@ class TestCheckpointReward:
     def test_multiple_checkpoints_in_one_frame(self) -> None:
         """At very high speed, we can cross multiple thresholds between frames."""
         t = TrackRewardTracker(_track())
+        initial_idx = t.current_checkpoint
         rb, _ = t.step(_state(race_completion=1.035))  # crosses 1.01, 1.02, 1.03
-        # Three checkpoint rewards fired in one step.
-        assert rb.checkpoint >= 3 * 1.0  # checkpoint_base × speed_bonus (≥1)
+        # Three checkpoints fired and reward is positive (exact value depends
+        # on per_hit_base which is normalized by n_checkpoints_per_lap).
+        assert t.current_checkpoint == initial_idx + 3
+        assert rb.checkpoint >= 3 * t.per_hit_base
+        assert rb.checkpoint <= 3 * t.per_hit_base * t.config.speed_bonus_max
 
     def test_speed_bonus_higher_for_faster_hits(self) -> None:
         # Fast hit: one frame of gap. Slow hit: expected_frames_per_checkpoint

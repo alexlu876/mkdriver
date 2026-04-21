@@ -43,13 +43,11 @@ if PROJECT_SRC not in sys.path:
     sys.path.insert(0, PROJECT_SRC)
 
 # --- stdlib imports -------------------------------------------------------
-import json
-import struct
 import time
 from multiprocessing.connection import Client
 
 import numpy as np
-from PIL import Image
+from PIL import Image  # noqa: F401  TODO(phase 2.1) observation capture uses this
 
 # --- Dolphin scripting-API imports (only valid inside Dolphin) -----------
 from dolphin import controller, event, memory, savestate  # type: ignore[import-not-found]
@@ -217,12 +215,17 @@ def main() -> None:
     conn = _connect_to_master()
     print(f"[slave {ENV_ID}] connected to master", flush=True)
 
-    # Wait for the game to boot before doing anything RAM-dependent.
-    for _ in range(60):
-        event.on_frameadvance  # touch to ensure API is live
+    # TODO(phase 2.1): proper boot-wait — we need to let the game fully load
+    # before RAM reads are valid. The previous naive `event.on_frameadvance`
+    # sentinel loop was a no-op (referenced the attribute without calling).
+    # Correct mechanism is a frame-counter inside on_frame, gated until
+    # boot_frames_seen >= N before allowing reset to proceed.
 
     addrs: _Addresses | None = None
     tracker: TrackRewardTracker | None = None
+    # TODO(phase 2.1): frame_stack will hold the rolling 4-frame grayscale
+    # observation once the sync frame-advance + event.framedrawn pattern is
+    # wired. Unused today — see observation-capture TODO in step loop below.
     frame_stack: list[np.ndarray] = []
     last_action: int = 0
     pending_reset: tuple[str, dict] | None = None
@@ -261,8 +264,9 @@ def main() -> None:
             break
         if isinstance(msg, tuple) and msg[0] == "reset":
             pending_reset = (msg[1], msg[2])
-            # Wait one frame so the load happens inside on_frame.
-            # TODO: synchronize via frame count to guarantee the load lands.
+            # TODO(phase 2.1): synchronize via frame count to guarantee the
+            # load lands before we send the first observation. Currently
+            # relies on the next step() to observe post-load state.
             continue
 
         # Must be an int action.
@@ -273,10 +277,10 @@ def main() -> None:
         # last_action each frame; we compute reward once at the end.
         # (VIPTankz does frame pooling over the last 2 frames; we do the
         # same for now — see DolphinScript.py:556-559.)
-        # TODO: actually implement the frameskip loop here once we confirm
-        # the scripting API's frame-advance primitive for sync waits inside
-        # the main loop. For now, this is a skeleton that needs a live
-        # Dolphin integration test to finalize.
+        # TODO(phase 2.1): implement the frameskip loop here once we
+        # confirm the scripting API's frame-advance primitive for sync
+        # waits inside the main loop. For now, this is a skeleton that
+        # needs a live Dolphin integration test to finalize.
 
         # Read state and compute reward.
         if addrs is None or tracker is None:
@@ -287,11 +291,11 @@ def main() -> None:
         state = _read_race_state(addrs)
         breakdown, done = tracker.step(state)
 
-        # TODO: gather a real observation here. VIPTankz uses
+        # TODO(phase 2.1): gather a real observation here. VIPTankz uses
         # ``event.framedrawn()`` in async context; we need the sync
-        # equivalent or we switch this whole script to async. For
-        # now, emit a zero observation so the wire format is stable
-        # and the master can process.
+        # equivalent or we switch this whole script to async. For now,
+        # emit a zero observation so the wire format is stable and the
+        # master can process.
         obs = np.zeros((FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
 
         info = {

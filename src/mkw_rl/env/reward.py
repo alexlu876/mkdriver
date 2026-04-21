@@ -32,10 +32,13 @@ class RewardConfig:
     effect. See the "backward-driving trap" note in TRAINING_METHODOLOGY.md.
     """
 
-    # Checkpoint reward. Base is from VIPTankz (+1 per checkpoint in v1);
+    # Checkpoint reward. Per ``docs/TRAINING_METHODOLOGY.md`` §5, the per-hit
+    # base is normalized by checkpoint count so cumulative per-lap checkpoint
+    # reward is ~constant across tracks regardless of WR time. The tracker
+    # computes actual_per_hit_base = checkpoint_reward_per_lap / n_checkpoints.
     # speed_bonus multiplies that by [1, speed_bonus_max] depending on how
     # fast the checkpoint was hit vs WR pace.
-    checkpoint_base: float = 1.0
+    checkpoint_reward_per_lap: float = 1.0
     speed_bonus_alpha: float = 0.5  # linear scale factor
     speed_bonus_max: float = 2.0  # clamp so a single fast checkpoint can't dominate
 
@@ -43,7 +46,10 @@ class RewardConfig:
     offroad_penalty: float = 0.01
     wall_penalty: float = 0.05
 
-    # Terminal rewards.
+    # Terminal rewards. Kept in the same scale as cumulative checkpoint
+    # reward (~1 per lap × laps × speed_bonus ≈ 3-6): a 10.0 finish bonus
+    # roughly doubles the total race reward, making finishing strictly
+    # preferred over timing out via reset threshold.
     finish_bonus: float = 10.0
     position_bonus_scale: float = 0.5  # (13 - pos) × scale; 13 matches VIPTankz's formula
 
@@ -118,6 +124,9 @@ class TrackRewardTracker:
     current_checkpoint: int = field(init=False, default=0)
     frames_since_checkpoint: int = field(init=False, default=0)
     expected_frames_per_checkpoint: int = field(init=False)
+    # Per-hit base reward, derived as config.checkpoint_reward_per_lap / n_per_lap.
+    # Populated in __post_init__.
+    per_hit_base: float = field(init=False)
     _finished: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
@@ -134,6 +143,11 @@ class TrackRewardTracker:
                 self.checkpoints.append(lap_start + i * step)
         # Sentinel so indexing by `current_checkpoint` never goes OOB post-finish.
         self.checkpoints.append(9999.0)
+
+        # Per-hit base, normalized so per-lap cumulative checkpoint reward
+        # equals config.checkpoint_reward_per_lap (before speed bonus).
+        # This prevents long tracks from dominating gradient signal.
+        self.per_hit_base = self.config.checkpoint_reward_per_lap / n_per_lap
 
         # Expected frames per checkpoint at WR pace. Used for speed_bonus scaling.
         # WR time covers the full race (3 laps). race_completion delta per WR = 3.0.
@@ -168,7 +182,7 @@ class TrackRewardTracker:
                 0.0, 1.0 - elapsed / self.expected_frames_per_checkpoint
             )
             speed_bonus = min(raw_bonus, self.config.speed_bonus_max)
-            breakdown.checkpoint += self.config.checkpoint_base * speed_bonus
+            breakdown.checkpoint += self.per_hit_base * speed_bonus
             self.current_checkpoint += 1
             self.frames_since_checkpoint = 0  # reset for the NEXT checkpoint's timing
 

@@ -218,7 +218,9 @@ class MkwDolphinEnv(gym.Env):
         # Gym distinguishes terminated (MDP end) from truncated (time limit).
         # Our reset-threshold path is effectively a truncation; the finish
         # condition is termination. For phase 1 we surface both as `done` via
-        # `terminated` since we don't yet track which triggered it — TODO.
+        # `terminated` since we don't yet track which triggered it.
+        # TODO(phase 2.1): slave should flag which condition fired so we
+        # can populate truncated correctly.
         return obs, reward, bool(done), False, info
 
     def close(self) -> None:

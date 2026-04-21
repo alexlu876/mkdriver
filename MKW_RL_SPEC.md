@@ -594,14 +594,16 @@ Phase 3 converts the single-track BC model into a 32-track model. Work:
 
 ---
 
-## Phase 4 — Gym env + BTR/PPO RL fine-tune (appendix stub)
+## Phase 4 — Gym env + BTR/PPO RL fine-tune (appendix stub — superseded)
 
-Fork `third_party/Wii-RL`, adapt:
+> **Status**: superseded by the 2026-04-17 pivot (see `docs/PIVOT_2026-04-17.md`). What was Phase 4 here is now the active **Phase 2**. Content below is preserved as historical record but is no longer authoritative.
 
-- `src/mkw_rl/env/dolphin_env.py` — `gymnasium.Env` wrapping their scripting fork's Python API. Action space: 21-way discrete steering × 16-way binary button combos (or factored; decide at implementation). Observation: `(4, 75, 140)` uint8 frames.
-- `src/mkw_rl/env/reward.py` — reward shaping. Start with VIPTankz's reward (progress + position), add shaping for drift usage and item pickups. Log reward components separately in wandb.
-- `src/mkw_rl/env/ram.py` — RAM addresses for PAL (`RMCP01`). Lap count, checkpoint progress, kart position, speed, drift state. Port directly from VIPTankz's `DolphinScript.py` base pointers (`0x809BD730`, `0x809C18F8`, `0x809C3618`) — they're PAL and plug in unchanged.
-- `src/mkw_rl/rl/btr.py` / `ppo.py` — BC init bridge. Because BC output is **already discrete** (§1.7), it is directly usable to init a DQN Q-head (distillation) or a PPO policy head (treat as soft target). This is cleaner than v1's framing. Algo choice (BTR vs PPO) made at the Phase 2 → Phase 3/4 checkpoint.
+Original Phase 4 scope (pre-pivot):
+
+- `src/mkw_rl/env/dolphin_env.py` — `gymnasium.Env` wrapping their scripting fork's Python API. Observation: `(4, 75, 140)` uint8 frames. **Action space: `Discrete(40)` per VIPTankz** (5 stick positions × 2 drift × 2 up × 2 item, A always held — see `docs/TRAINING_METHODOLOGY.md`). Earlier drafts of this line proposed a 21-way steering × 16-way button space; that's the BC action space, not BTR's.
+- `src/mkw_rl/env/reward.py` — reward shaping per `docs/TRAINING_METHODOLOGY.md` §5 (variable-per-track checkpoints × speed bonus, off-road/wall penalties, finish + position bonuses, lenient reset).
+- `src/mkw_rl/env/dolphin_script.py` — slave-side RAM reads. PAL RMCP01 pointer chains ported verbatim from VIPTankz's `DolphinScript.py` (`0x809BD730`, `0x809C18F8`, `0x809C3618`).
+- `src/mkw_rl/rl/btr.py` — BTR fork with LSTM added on top of the IMPALA encoder + R2D2-style burn-in replay. Future BC warm-start path: load BC's encoder+LSTM weights only (not heads — different action spaces).
 
 ---
 
