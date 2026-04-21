@@ -61,7 +61,7 @@ Two YouTube videos by AI-Tango (the author of VIPTankz/Wii-RL and the BTR paper)
 
 | Component | Value | Notes |
 |---|---|---|
-| Checkpoint-hit reward | `base × speed_bonus` | `base = 1.0 / N_checkpoints_for_track`, `speed_bonus` = multiplier rewarding fast checkpoint hits. Normalizes so total per-lap checkpoint reward is ~constant across tracks. |
+| Checkpoint-hit reward | `base × speed_bonus` | `base = checkpoint_reward_per_lap / N_checkpoints_for_track` (config default: `1.0`), `speed_bonus` = multiplier rewarding fast checkpoint hits. Normalizes so total per-lap checkpoint reward is ~constant across tracks. |
 | Off-road penalty | `-c_offroad` per frame while off-road | Small. Tune so that intentional shortcuts through off-road (with a mushroom) are still net positive. |
 | Wall-contact penalty | `-c_wall` per frame on wall | Larger. |
 | Finish bonus | `+R_finish` on race completion | Large. |

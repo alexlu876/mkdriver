@@ -47,7 +47,7 @@ import time
 from multiprocessing.connection import Client
 
 import numpy as np
-from PIL import Image  # noqa: F401  TODO(phase 2.1) observation capture uses this
+from PIL import Image
 
 # --- Dolphin scripting-API imports (only valid inside Dolphin) -----------
 from dolphin import controller, event, memory, savestate  # type: ignore[import-not-found]

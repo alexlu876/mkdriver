@@ -20,5 +20,8 @@ __pycache__/
 # wandb
 wandb/
 
+# Training run outputs (CSV logs, checkpoints)
+runs/
+
 # Claude Code local settings
 .claude/settings.local.json
