@@ -7,12 +7,13 @@ VIPTankz's published v1 BTR).
 Components:
 - ``networks`` — FactorizedNoisyLinear (noisy-nets), Dueling branch. Ported
   verbatim from VIPTankz's ``BTR.py`` with light formatting cleanup.
-- ``replay`` — PER + SumTree. Pass 1 mirrors VIPTankz; pass 3 will extend
-  for R2D2-style burn-in sequence sampling.
+- ``replay`` — PER + SumTree + R2D2 sequence sampling (``sample_sequences``).
+  Pass 1 ported VIPTankz's transition-level replay; pass 3 added the
+  sequence-level sampler without breaking the transition API.
 - ``model`` — BTRPolicy composing ``mkw_rl.bc.model.ImpalaEncoder`` + LSTM +
   IQN heads, chosen for direct BC↔BTR weight compatibility at the encoder
   and LSTM.
-- ``track_sampler`` (pass 4) — progress-weighted track picker.
+- ``track_sampler`` (pass 4, upcoming) — progress-weighted track picker.
 """
 
 from mkw_rl.rl.model import BTRConfig, BTRPolicy

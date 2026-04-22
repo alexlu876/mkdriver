@@ -9,9 +9,10 @@ Two classes:
 - ``PER``: prioritized replay buffer with frame-stacking and n-step returns.
   Stores raw frames once and indexes into them via a pointer table —
   significantly reduces memory vs storing stacked frames per transition.
-  Handles multi-env rollouts via ``stream`` IDs (pre-pass-3 this is
-  transition-based replay; pass 3 will extend the ``sample()`` contract
-  to R2D2-style burn-in sequences).
+  Handles multi-env rollouts via ``stream`` IDs. Exposes two samplers:
+  ``sample()`` for transition-level Q-learning and ``sample_sequences()``
+  for R2D2-style recurrent replay (added in pass 3). Both share storage
+  and SumTree priorities.
 
 Ported from ``~/code/mkw/Wii-RL/BTR.py:311-733``. Algorithm preserved
 line-by-line; only formatting, type hints, 4-space indent (the original
@@ -483,12 +484,34 @@ class PER:
         the previous lap of the buffer — i.e., stale / broken trajectory).
         Up to 5 rejection retries before raising.
 
+        Priority update contract
+        ------------------------
+        R2D2 paper §2.3 eq. 1 specifies sequence priority as
+        ``p = η · max_t|δ_t| + (1-η) · mean_t|δ_t|`` with ``η = 0.9``.
+        Since ``update_priorities`` takes a scalar per sequence and our
+        sampler uses transition-level SumTree priorities indexed by the
+        sequence START position, the training loop is expected to
+        aggregate its ``(B, T)`` per-timestep TD errors into ``(B,)``
+        with the above formula (or a documented alternative) before
+        calling ``update_priorities(tree_idxs, aggregated)``. A naive
+        ``mean(dim=1)`` works but silently deviates from R2D2.
+
+        Approximation vs canonical R2D2
+        --------------------------------
+        R2D2 stores *sequence-level* priorities. We use the existing
+        transition-level SumTree (shared with ``sample()``) and index
+        by the sequence's START transition. Effect: transitions that
+        have never been a start get the buffer's default max priority
+        and are oversampled as sequence starts until hit once. In
+        practice this self-corrects quickly; flag in case any future
+        A/B test reveals a meaningful difference vs a dedicated
+        sequence-priority tree.
+
         Returns
         -------
         tree_idxs : (B,) numpy int array
             SumTree indices of the sequence START positions — for
-            update_priorities(). R2D2 typically scores priority as
-            max-TD over the sequence; training loop decides the aggregation.
+            update_priorities() per the contract above.
         states : (B, T, framestack, H, W) float32 on device
         actions : (B, T) int64 on device
         rewards : (B, T) float32 on device — n-step discounted return at each t
@@ -524,26 +547,31 @@ class PER:
         prios, start_idxs, tree_idxs = self.st.find(samples)
         probs = prios / p_total
 
-        # Build sequence index matrix via circular wrap.
-        # Shape: (B, T)
-        seq_idxs = (start_idxs[:, None] + np.arange(seq_len)[None, :]) % self.capacity
+        # Build RAW sequence indices (before any modular wrap). Validity is
+        # checked on the raw indices; the modular `seq_idxs` is only used for
+        # actually indexing pointer_mem once we know the window is valid.
+        #
+        # Earlier code did `(start + offset) % capacity` first and then tried
+        # to check `seq_idxs >= capacity` — which was dead code since modulo
+        # always produces values in [0, capacity). Pre-wrap sequences near
+        # capacity-1 would silently wrap to index 0 and stitch together two
+        # unrelated episodes. Fixed by deferring modulo until after validity.
+        raw_idxs = start_idxs[:, None] + np.arange(seq_len)[None, :]
 
-        # Reject any sequence whose window crosses the write head once the
-        # buffer has wrapped (point_mem_idx is the next write position; any
-        # sequence containing point_mem_idx spans the seam between new and
-        # stale data). Pre-wrap (capacity < size), everything up to
-        # point_mem_idx is valid, so we reject if seq_idxs[b, t] ≥ capacity
-        # OR touches the write-head seam.
-        # NOTE: this is conservative — a fully-empty buffer region between
-        # writes and the old head's tail could still be valid, but rejecting
-        # is safer and cheaper than tracking the exact liveness interval.
+        # Reject any sequence whose window crosses the write head (wrapped
+        # buffer) or extends past the filled region (pre-wrap). The rejected
+        # batch is retried; see the `count` recursion below.
         if self.capacity == self.size:
-            # Wrapped buffer: reject if any element of the sequence == write head.
+            # Wrapped buffer: reject if any element lands on the write head,
+            # which marks the seam between new and stale trajectories.
+            seq_idxs = raw_idxs % self.capacity
             invalid_mask = np.any(seq_idxs == self.point_mem_idx, axis=1)
         else:
-            # Pre-wrap: reject if any element lands in uninitialized territory
-            # (index >= capacity after modular).
-            invalid_mask = np.any(seq_idxs >= self.capacity, axis=1)
+            # Pre-wrap: reject if any raw index extends past the filled range.
+            # No modulo needed for valid starts — they all produce indices in
+            # [0, capacity) without wrapping.
+            invalid_mask = np.any(raw_idxs >= self.capacity, axis=1)
+            seq_idxs = raw_idxs  # guaranteed in [0, capacity) for valid rows
 
         if invalid_mask.any():
             if count >= 5:

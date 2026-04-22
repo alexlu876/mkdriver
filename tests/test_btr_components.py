@@ -423,15 +423,37 @@ class TestPERSampleSequences:
     def test_sequence_contains_consecutive_actions(self) -> None:
         """Actions within a sampled sequence should correspond to consecutive
         transitions from storage — they won't be strictly monotonic because
-        we cycle action=i%4, but they should reflect the append order locally."""
+        we cycle action=i%4, but they should reflect the append order locally.
+
+        Loop many draws to catch any seam-crossing bug deterministically —
+        earlier we had a dead-code pre-wrap rejection check that silently
+        let sequences wrap from capacity-1 to 0, which would produce a
+        non-(+1, -3) diff at the wrap point.
+        """
         per = self._make_per(size=128, n=1)
         self._fill(per, 100)
-        _, _, actions, *_ = per.sample_sequences(1, seq_len=5)
-        # For any start idx k, actions should be [(k)%4, (k+1)%4, ...] — local
-        # progression by +1 mod 4.
-        diffs = (actions[0, 1:] - actions[0, :-1]).cpu().numpy()
-        # Valid diffs are either +1 or -3 (mod 4 wrap).
-        assert all(d in (1, -3) for d in diffs), f"non-consecutive actions: {actions[0]}"
+        # Draw 200 sequences; at ~4% seam probability per draw this catches
+        # the pre-wrap bug with near-certainty if it were present.
+        for _ in range(50):
+            _, _, actions, *_ = per.sample_sequences(4, seq_len=5)
+            for b in range(actions.shape[0]):
+                diffs = (actions[b, 1:] - actions[b, :-1]).cpu().numpy()
+                assert all(
+                    d in (1, -3) for d in diffs
+                ), f"non-consecutive actions (seam crossing?): {actions[b]}"
+
+    def test_seq_len_1_shapes(self) -> None:
+        """seq_len=1 should produce (B, 1)-shaped outputs — a degenerate case
+        that should behave identically to a transition sample with an extra
+        time axis. Guards against future refactors breaking the edge case."""
+        per = self._make_per(size=64, n=3)
+        self._fill(per, 50)
+        _, states, actions, rewards, _, dones, weights = per.sample_sequences(4, 1)
+        assert states.shape == (4, 1, 4, 20, 30)
+        assert actions.shape == (4, 1)
+        assert rewards.shape == (4, 1)
+        assert dones.shape == (4, 1)
+        assert weights.shape == (4,)
 
     def test_priority_updates_affect_sequence_sampling(self) -> None:
         """A boosted-priority start idx should appear in every batch."""
