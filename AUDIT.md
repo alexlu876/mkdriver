@@ -1,5 +1,9 @@
 # Code audit
 
+> **⚠️ Scope: DORMANT BC PIPELINE ONLY.** This audit predates the 2026-04-17 pivot to multi-track BTR (see [docs/PIVOT_2026-04-17.md](docs/PIVOT_2026-04-17.md)). Findings here apply to code that is preserved for future BC-augmentation but is *not* on the active critical path. BC blockers (B-1 replay driver, etc.) may no longer be worth fixing.
+>
+> For the active BTR pipeline audit, see the "Post-pass-5 audit fixes" section of [CHANGES.md](CHANGES.md) — the 2026-04-21 multi-agent audit of `src/mkw_rl/rl/train.py` and its pass-5 surface. Those findings have all been applied.
+
 Audit of the BC pipeline code (Phase 0 - 2) for bugs, spec violations, and failure modes that will surface once real Dolphin + ISO + demos are available.
 
 **Scope**: every file under `src/`, `scripts/`, `docs/`, `tests/`, plus `pyproject.toml` and root-level docs.

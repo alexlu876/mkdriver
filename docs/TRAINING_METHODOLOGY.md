@@ -110,4 +110,12 @@ Architecture deviation (documented inline in `src/mkw_rl/rl/model.py`):
 
 6. **Cosine embedding index `{0..n_cos-1}`** (VIPTankz convention) instead of the canonical `{1..n_cos}` from Dabney eq. 4. The `i=0` term gives `cos(0)=1` for every τ — wastes one basis dim on a constant the Linear's bias already provides. Kept for weight-transfer compatibility with VIPTankz's pre-trained model.
 
-See `src/mkw_rl/rl/replay.py` and `src/mkw_rl/rl/model.py` docstrings for the full tradeoff analysis per item.
+Training-loop deviations (documented in `src/mkw_rl/rl/train.py` module docstring):
+
+7. **Quantile-Huber axis convention per Dabney eq. 10** — sum over target-τ, mean over online-τ. VIPTankz's BTR.py:1076 has these swapped. Mathematically identical when `num_tau_online == num_tau_target` (our default), but the Dabney form is correct if we ever decouple the two tau counts.
+8. **Priority signal uses `mean(dim=tau).mean(dim=tau)`** (scale-invariant) rather than VIPTankz's `sum(dim=tau).mean(dim=tau)` which scales with num_tau. Avoids priorities drifting with num_tau changes during tuning.
+9. **Sequence-level priority aggregation** per R2D2 §2.3 eq. 1: `η·max_t|δ_t| + (1-η)·mean_t|δ_t|` with `η=0.9`. VIPTankz is feed-forward so they update transition-level priorities directly; our LSTM variant needs this aggregation.
+10. **Target-net sync cadence 200 grad steps** (not VIPTankz's 500). MKWii's non-stationarity across tracks rewards a faster-tracking target. Revisit if A/B testing shows it doesn't matter.
+11. **No ε-greedy schedule** — we drop VIPTankz's 25M-frame ε-decay and rely on noisy-nets exploration alone. Simplifies the training loop; if exploration is too weak early, reintroduce.
+
+See `src/mkw_rl/rl/replay.py`, `src/mkw_rl/rl/model.py`, and `src/mkw_rl/rl/train.py` docstrings for full per-item analysis.

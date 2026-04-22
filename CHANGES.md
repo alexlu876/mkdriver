@@ -1,8 +1,46 @@
 # Autonomous build-out: change log
 
-> **⚠️ Strategic pivot 2026-04-17**: the plan below (BC first, then multi-track, then RL) is superseded. Project skipped BC and jumped to multi-track BTR directly. See [docs/PIVOT_2026-04-17.md](docs/PIVOT_2026-04-17.md). The code produced in Phases 1-2 is preserved as future BC-augmentation scaffolding but is not on the current critical path. Region was also changed from NTSC-U to PAL on the same day — see [docs/REGION_DECISION.md](docs/REGION_DECISION.md) — and propagated across the codebase.
+> **⚠️ Strategic pivot 2026-04-17**: the BC-first plan below is superseded. Project skipped BC and jumped to multi-track BTR directly. See [docs/PIVOT_2026-04-17.md](docs/PIVOT_2026-04-17.md). The code produced in Phases 1-2 is preserved as future BC-augmentation scaffolding but is not on the current critical path. Region was also changed from NTSC-U to PAL on the same day — see [docs/REGION_DECISION.md](docs/REGION_DECISION.md) — and propagated across the codebase.
 
 All prompts executed autonomously in one session. Running log of decisions, deviations from spec, outstanding blockers, and things you should review before proceeding.
+
+## Post-pivot passes (BTR, 2026-04-21 → 2026-04-22)
+
+### Phase 2.1 — env fork
+
+`src/mkw_rl/env/dolphin_env.py` + `dolphin_script.py`: master/slave split that launches Dolphin as a subprocess and talks to it over an authenticated Unix domain socket. Gym-compatible `reset(track_slug=...)` / `step(action)` API. Live-smoke-tested against Luigi Circuit on 2026-04-21 — 20-step rollout with reward ticking at checkpoints, clean close.
+
+### Phase 2.2 — BTR fork (5 passes)
+
+1. **Helper components** — `FactorizedNoisyLinear`, cos embedding for IQN, `ImpalaResidualBlock`, `ImpalaLargeEncoder`. Fully-tested leaves before composition.
+2. **BTRPolicy** — IMPALA → LSTM (v2 addition) → IQN dueling head with NoisyLinear throughout. Kapturowski-style burn-in hidden-state carry.
+3. **PER.sample_sequences()** — R2D2 recurrent replay sampling with seam-rejection for wrapped buffers. Fixes a pre-wrap sequence-seam bug found during the pass-3 audit.
+4. **ProgressWeightedTrackSampler** — `weight[slug] = max(progress) - progress[slug] + ε` curriculum that self-corrects as tracks get solved.
+5. **Training loop** — `src/mkw_rl/rl/train.py` (`BTRAgent.learn_step` with Munchausen-IQN loss, Dabney eq. 10 quantile Huber, R2D2 priority aggregation η·max + (1-η)·mean), `scripts/train_btr.py` CLI, `configs/btr.yaml` with a `testing:` subtree for smoke runs, and a 27-test unit-test suite for the pass-5 code paths.
+
+### Post-pass-5 audit fixes (2026-04-21)
+
+Multi-agent audit surfaced 6 blockers + 9 high-severity findings. Applied:
+
+- **Target-net noise contract restored** — dropped a spurious `reset_noise()` on the target that contradicted the `disable_noise()` guarantee at build + sync.
+- **Target LSTM hidden aligned to n-state** — burn-in now runs on `n_states[:, :burn_in]` so `hidden_target` corresponds to the timestep the target's learning forward actually consumes (was off by `n_step`).
+- **Checkpoint-resume path** — `_save_checkpoint()`, `load_checkpoint()`, `--resume` CLI flag; restores online/target/optimizer/counters/sampler EMA. Replay is re-warmed from scratch (docstring explains trade-off).
+- **Dolphin crash-restart** — outer loop catches socket EOF / BrokenPipeError / ConnectionResetError / OSError, tears down the env, relaunches, continues. Aborts after 5 consecutive crashes.
+- **Graceful shutdown** — SIGTERM handler + KeyboardInterrupt path flip a flag polled at episode boundary; always writes a `*_final.pt` on exit. Second signal bypasses graceful path.
+- **NaN/inf bail** — `learn_step` checks `isfinite(loss)` and `isfinite(grad_norm)` before optimizer step; skip + WARN log + abort after 50 consecutive failures.
+- **log_every_grad_steps wired** — learn-step metrics emitted mid-episode at configured cadence; was previously parsed from YAML but never consumed.
+- **Warmup progress log** — replay fill ratio logged as `replay/capacity`, `replay/fill_ratio` in every episode row; INFO line every ~5% of `min_sampling_size`.
+- **CSV logger rewritten** — RFC-4180-compatible; rewrites file + rewrites header when new metric keys appear (was emitting `#`-prefixed malformed headers + silently dropping new columns).
+- **sample_sequences retry fix** — rows are refilled in place on invalid hits (up to 20 attempts) instead of re-rolling the whole batch on any single miss. Converges in O(1) retries under tight capacity.
+- **Online burn-in noise consistent** — online net's `reset_noise()` now fires above the burn-in so the LSTM warm-up uses the same noise realization as the learning forward.
+- **Stdlib `random` seeded** alongside torch + numpy.
+- **Env ↔ replay stack-order assertion** at episode start so a regression in frame-stack layout fails loudly.
+
+### Tests
+
+27 new unit tests in `tests/test_btr_training.py` covering: config merge, quantile-Huber (+Dabney axis), Munchausen reward bonus clamping, full loss pathway (including zero-weights → zero-grad, munch_alpha=0 vs 0.9 divergence, all-dones gating), `_CSVLogger` disjoint-key round-trip, `BTRAgent.act` / `sync_target` / `learn_step` (incl. noop-before-warmup + NaN bail + priority writeback), and full checkpoint save → load → match round-trip (weights + counters + sampler EMA). 269 tests total pass.
+
+## Pre-pivot (BC) history — superseded
 
 ## TL;DR
 

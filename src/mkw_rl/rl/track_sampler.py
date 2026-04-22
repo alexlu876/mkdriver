@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -219,6 +220,30 @@ class ProgressWeightedTrackSampler:
     @property
     def n_tracks(self) -> int:
         return len(self.progress)
+
+    # ------------------------------------------------------------------
+    # Checkpoint serialization.
+    # ------------------------------------------------------------------
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize progress EMA + RNG state for checkpoint resume.
+
+        The RNG state is preserved so post-resume ``sample()`` sequences
+        match the uninterrupted run (under a fixed seed).
+        """
+        return {
+            "progress": dict(self.progress),
+            "rng_state": self._rng.bit_generator.state,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore from ``state_dict()``. Silently keeps tracks that weren't
+        in the saved state at cold-start progress (e.g., user added a savestate
+        between the ckpt and the resume)."""
+        for slug, p in state["progress"].items():
+            if slug in self.progress:
+                self.progress[slug] = float(p)
+        self._rng.bit_generator.state = state["rng_state"]
 
 
 def construct_from_available(

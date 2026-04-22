@@ -17,8 +17,9 @@ See:
 
 - **P-1 preflight**: complete on Apple Silicon (2026-04-17).
 - **Phase 2.1 env fork**: live-smoke-tested against Dolphin on Luigi Circuit (2026-04-21).
-- **Phase 2.2 BTR fork**: passes 1–4 complete — helper components, `BTRPolicy` with IMPALA+LSTM+IQN, `PER.sample_sequences()` for R2D2 recurrent replay, and `ProgressWeightedTrackSampler` for multi-track curriculum. Pass 5 (training loop + `configs/btr.yaml` + Vast.ai runbook) pending.
-- **Phase 3+ (curriculum tuning, multi-env scaling)**: downstream of pass 5.
+- **Phase 2.2 BTR fork**: passes 1–5 complete — helper components, `BTRPolicy` (IMPALA+LSTM+IQN), `PER.sample_sequences()` for R2D2 recurrent replay, `ProgressWeightedTrackSampler` for multi-track curriculum, and a full training loop with Munchausen-IQN loss, checkpoint-resume, graceful shutdown, NaN-bail, and env crash-restart. Post-pass-5 audit findings (2026-04-21) applied inline.
+- **Vast.ai runbook**: pending (next deliverable before production run).
+- **Phase 3+ (curriculum tuning, multi-env scaling)**: downstream of the Vast.ai runbook.
 
 See [CHANGES.md](CHANGES.md) for the running build-out log.
 
@@ -30,4 +31,15 @@ git clone <this-repo> && cd mkwii
 git submodule update --init --recursive
 uv sync --extra dev
 uv run pytest
+
+# Smoke-test the full training loop against live Dolphin (~1 min, Luigi Circuit
+# only, tiny model). Run this before any real training launch.
+uv run python scripts/train_btr.py --config configs/btr.yaml --testing
+
+# Production run (500M env steps — consume Vast.ai compute).
+uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda
+
+# Resume from a checkpoint after preemption / crash.
+uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda \
+  --resume runs/btr/btr_20260422_123456_final.pt
 ```

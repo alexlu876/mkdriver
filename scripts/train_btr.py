@@ -71,6 +71,13 @@ def main() -> int:
         default=None,
         help="Override runtime.seed in the YAML.",
     )
+    ap.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Resume from a checkpoint .pt produced by a previous run "
+        "(restores online/target/optimizer/counters; replay is re-warmed).",
+    )
     args = ap.parse_args()
 
     # Deferred import so logging config above takes effect before any mkw_rl
@@ -93,7 +100,11 @@ def main() -> int:
             cfg.total_frames, cfg.batch_size, cfg.replay_size,
         )
 
-    train(cfg)
+    if args.resume is not None and not args.resume.exists():
+        print(f"error: resume checkpoint {args.resume} not found", file=sys.stderr)
+        return 1
+
+    train(cfg, resume_from=args.resume)
     return 0
 
 

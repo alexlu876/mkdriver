@@ -31,6 +31,8 @@ import copy
 import csv
 import logging
 import os
+import random
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -228,29 +230,52 @@ class Logger(Protocol):
 
 
 class _CSVLogger:
-    """Simple append-only CSV logger. One row per log() call, columns grow
-    as new metric keys appear (older rows stay NaN-padded on read)."""
+    """RFC-4180-compatible CSV logger. One row per log() call. Columns may
+    grow as new metric keys appear — when they do, the whole file is rewritten
+    with the extended header and all previous rows (padded). The file is
+    always readable by ``pandas.read_csv`` at any point.
+
+    Small per-run log volume makes the rewrite cost negligible vs the
+    alternative (malformed headers or silently-dropped columns)."""
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._columns: list[str] = []
-        self._fh = open(path, "a", buffering=1)  # line-buffered
-        self._writer: csv.writer | None = None
+        self._columns: list[str] = ["step"]
+        self._rows: list[dict[str, Any]] = []
+        self._fh = open(path, "w", buffering=1)  # line-buffered
+        self._writer = csv.DictWriter(self._fh, fieldnames=self._columns)
+        self._writer.writeheader()
+        self._fh.flush()
+
+    def _rewrite(self) -> None:
+        """Rewrite the whole file with the current ``_columns`` + ``_rows``.
+        Triggered when a new metric key appears."""
+        self._fh.close()
+        self._fh = open(self.path, "w", buffering=1)
+        self._writer = csv.DictWriter(self._fh, fieldnames=self._columns)
+        self._writer.writeheader()
+        for row in self._rows:
+            self._writer.writerow({k: row.get(k, "") for k in self._columns})
+        self._fh.flush()
 
     def log(self, metrics: dict[str, float], step: int) -> None:
-        row = {"step": step, **metrics}
+        row: dict[str, Any] = {"step": step, **metrics}
         new_cols = [k for k in row if k not in self._columns]
         if new_cols:
             self._columns.extend(new_cols)
-            # Rewrite header — acceptable since this is append-only for small runs.
-            self._fh.write("# " + ",".join(self._columns) + "\n")
-        if self._writer is None:
-            self._writer = csv.DictWriter(self._fh, fieldnames=self._columns)
+            self._rows.append(row)
+            self._rewrite()
+            return
+        self._rows.append(row)
         self._writer.writerow({k: row.get(k, "") for k in self._columns})
+        self._fh.flush()
 
     def close(self) -> None:
-        self._fh.close()
+        try:
+            self._fh.flush()
+        finally:
+            self._fh.close()
 
 
 class _WandbLogger:
@@ -442,6 +467,11 @@ class BTRAgent:
 
     grad_steps: int = field(default=0)
     env_steps: int = field(default=0)
+    # Consecutive non-finite loss/grad events — abort after MAX_NONFINITE to
+    # avoid silently training on NaN weights. Reset by any finite step.
+    nonfinite_streak: int = field(default=0)
+
+    MAX_NONFINITE: int = 50
 
     @classmethod
     def build(cls, cfg: TrainConfig) -> BTRAgent:
@@ -551,22 +581,27 @@ class BTRAgent:
 
         burn_in = self.cfg.burn_in_len
         burn_states = states[:, :burn_in]
+        burn_n_states = n_states[:, :burn_in]
         learn_states = states[:, burn_in:]
         learn_n_states = n_states[:, burn_in:]
         learn_actions = actions[:, burn_in:]
         learn_rewards = rewards[:, burn_in:]
         learn_dones = dones[:, burn_in:]
 
-        # Burn-in forward on online + target. No grad; purpose is only to
-        # warm up the LSTM hidden state so the learning-window forward starts
-        # from roughly the collection-time hidden.
+        # Warm-up noise: resample before BOTH burn-in and learning forward so
+        # the LSTM hidden state is computed under the same noise realization
+        # that the subsequent gradient step will use. Target stays deterministic
+        # (disable_noise at build + sync); do NOT reset_noise() on target here.
+        self.online_net.reset_noise()
+
+        # Burn-in forward on online + target. No grad; warms up the LSTM hidden.
+        # Target burns in on n_states so its hidden corresponds to n_states[:, burn_in]
+        # — this is the state the learning-window target forward actually consumes.
         with torch.no_grad():
-            self.target_net.reset_noise()
             _, _, hidden_online = self.online_net(burn_states)
-            _, _, hidden_target = self.target_net(burn_states)
+            _, _, hidden_target = self.target_net(burn_n_states)
 
         # Learning-window forward on online (with grad).
-        self.online_net.reset_noise()
         online_quantiles_seq, online_taus_seq, _ = self.online_net(
             learn_states, hidden=hidden_online
         )
@@ -612,12 +647,43 @@ class BTRAgent:
             entropy_tau=self.cfg.entropy_tau,
         )
 
+        # NaN/inf guard: entropy_tau=0.03 + outlier Q can overflow logsumexp.
+        # Skip the step rather than poisoning weights with a NaN Adam moment.
+        if not torch.isfinite(loss):
+            self.nonfinite_streak += 1
+            log.warning(
+                "non-finite loss at grad_step=%d (streak=%d/%d); skipping step",
+                self.grad_steps, self.nonfinite_streak, self.MAX_NONFINITE,
+            )
+            if self.nonfinite_streak >= self.MAX_NONFINITE:
+                raise RuntimeError(
+                    f"aborting: {self.MAX_NONFINITE} consecutive non-finite losses. "
+                    "Training likely diverged; inspect recent metrics + replay state."
+                )
+            return {"loss": float("nan"), "grad_norm": float("nan"),
+                    "grad_steps": self.grad_steps, "nonfinite_streak": self.nonfinite_streak}
+
         # Backward + clip + step.
         self.optimizer.zero_grad()
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.online_net.parameters(), self.cfg.grad_clip
         ).item()
+        if not np.isfinite(grad_norm):
+            self.nonfinite_streak += 1
+            log.warning(
+                "non-finite grad_norm at grad_step=%d (streak=%d/%d); skipping step",
+                self.grad_steps, self.nonfinite_streak, self.MAX_NONFINITE,
+            )
+            if self.nonfinite_streak >= self.MAX_NONFINITE:
+                raise RuntimeError(
+                    f"aborting: {self.MAX_NONFINITE} consecutive non-finite grad_norms"
+                )
+            # Grads are NaN; zero them so the Adam moments don't get poisoned.
+            self.optimizer.zero_grad()
+            return {"loss": float(loss.item()), "grad_norm": float("nan"),
+                    "grad_steps": self.grad_steps, "nonfinite_streak": self.nonfinite_streak}
+        self.nonfinite_streak = 0
         self.optimizer.step()
 
         # Priority update: aggregate per-sequence via R2D2's η·max + (1-η)·mean.
@@ -647,29 +713,42 @@ def run_one_episode(
     agent: BTRAgent,
     env: MkwDolphinEnv,
     track_slug: str,
+    logger: Logger | None = None,
+    shutdown_flag: dict[str, bool] | None = None,
 ) -> tuple[float, dict[str, float], int]:
     """Run a single episode. Transitions are appended to replay; one learn
     step per env step (replay_ratio=1) fires when replay is warmed up.
 
+    If ``logger`` is provided, learn-step metrics are logged every
+    ``cfg.log_every_grad_steps`` grad steps (mid-episode, not just at
+    episode end). ``shutdown_flag["shutdown"]`` is checked after each step
+    for graceful termination.
+
     Returns (episode_return, reward_component_sums, n_steps).
     """
     obs, info = env.reset(options={"track_slug": track_slug})
+    # Env and replay both maintain framestacks. Sanity-check the env's stack
+    # shape so a silent regression where the env starts returning single
+    # frames (or differently-ordered stacks) would fail loudly here.
+    assert obs.shape == (agent.cfg.framestack, agent.cfg.imagey, agent.cfg.imagex), (
+        f"env obs shape {obs.shape} doesn't match "
+        f"(framestack={agent.cfg.framestack}, H={agent.cfg.imagey}, W={agent.cfg.imagex})"
+    )
     prev_obs = obs.copy()  # frame_stack at t for replay append (state_t)
     hidden = None
     episode_return = 0.0
     reward_components_sum: dict[str, float] = {}
     step = 0
+    log_cadence = agent.cfg.log_every_grad_steps
 
     while True:
         # To tensor for action selection: (1, 1, stack, H, W).
-        obs_t = torch.from_numpy(obs).unsqueeze(0).unsqueeze(0)  # (1, 1, 4, H, W)
+        obs_t = torch.from_numpy(obs).unsqueeze(0).unsqueeze(0)
         action, hidden = agent.act(obs_t, hidden)
 
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        # Append the transition.
-        # PER.append expects: state (framestack), action, reward, n_state (framestack), done, trun, stream
         agent.replay.append(
             state=prev_obs,
             action=action,
@@ -686,18 +765,76 @@ def run_one_episode(
         for k, v in rb.items():
             reward_components_sum[k] = reward_components_sum.get(k, 0.0) + float(v)
 
-        # Learn step (once per env step at replay_ratio=1).
+        # Learn step (once per env step at replay_ratio=1). Emit learn metrics
+        # at configured grad-step cadence so mid-training loss spikes are
+        # visible without waiting for the episode boundary.
         for _ in range(agent.cfg.replay_ratio):
-            agent.learn_step()
+            learn_metrics = agent.learn_step()
+            if (
+                logger is not None
+                and learn_metrics
+                and log_cadence > 0
+                and agent.grad_steps > 0
+                and agent.grad_steps % log_cadence == 0
+            ):
+                learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
+                logger.log(learn_log, step=agent.env_steps)
 
         prev_obs = next_obs.copy()
         obs = next_obs
         step += 1
 
-        if done:
+        if done or (shutdown_flag is not None and shutdown_flag.get("shutdown")):
             break
 
     return episode_return, reward_components_sum, step
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint save + load.
+# ---------------------------------------------------------------------------
+
+
+def _save_checkpoint(agent: BTRAgent, cfg: TrainConfig, path: Path) -> None:
+    """Serialize agent state to ``path``. Replay buffer is NOT stored —
+    re-warmup on resume is ~200K steps (<0.1% of a 500M-frame run)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "online": agent.online_net.state_dict(),
+            "target": agent.target_net.state_dict(),
+            "optimizer": agent.optimizer.state_dict(),
+            "grad_steps": agent.grad_steps,
+            "env_steps": agent.env_steps,
+            "nonfinite_streak": agent.nonfinite_streak,
+            "sampler_state": agent.sampler.state_dict(),
+            "config": cfg.__dict__,
+        },
+        path,
+    )
+    log.info("saved checkpoint %s (grad=%d env=%d)", path, agent.grad_steps, agent.env_steps)
+
+
+def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
+    """Restore agent state in place from a ``_save_checkpoint`` output.
+
+    Replay is not saved/loaded — the outer train loop re-warms from scratch.
+    This means the first ~200K steps post-resume are random-policy exploration
+    (matching min_sampling_size) regardless of the resumed grad_step count.
+    """
+    ckpt = torch.load(path, map_location=agent.device)
+    agent.online_net.load_state_dict(ckpt["online"])
+    agent.target_net.load_state_dict(ckpt["target"])
+    agent.optimizer.load_state_dict(ckpt["optimizer"])
+    agent.grad_steps = int(ckpt["grad_steps"])
+    agent.env_steps = int(ckpt["env_steps"])
+    agent.nonfinite_streak = int(ckpt.get("nonfinite_streak", 0))
+    if "sampler_state" in ckpt:
+        agent.sampler.load_state_dict(ckpt["sampler_state"])
+    log.info(
+        "resumed from %s: grad_steps=%d env_steps=%d",
+        path, agent.grad_steps, agent.env_steps,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -705,10 +842,53 @@ def run_one_episode(
 # ---------------------------------------------------------------------------
 
 
-def train(cfg: TrainConfig, env: MkwDolphinEnv | None = None) -> BTRAgent:
+def _install_shutdown_handler() -> dict[str, bool]:
+    """Install SIGTERM handler + KeyboardInterrupt-safe shutdown flag.
+
+    Returns a mutable dict {"shutdown": bool} that ``run_one_episode`` polls
+    between env steps. A second SIGTERM bypasses graceful exit (prevents a
+    wedged shutdown from blocking a second preempt signal).
+    """
+    flag = {"shutdown": False, "second_signal": False}
+    original = signal.getsignal(signal.SIGTERM)
+
+    def handler(signum: int, frame: object) -> None:
+        if flag["shutdown"]:
+            # Second signal — restore default handler so a repeat kill works.
+            log.warning("received second signal %d; restoring default handler", signum)
+            signal.signal(signal.SIGTERM, original if callable(original) else signal.SIG_DFL)
+            flag["second_signal"] = True
+            return
+        log.warning(
+            "received signal %d; will shut down gracefully after current episode",
+            signum,
+        )
+        flag["shutdown"] = True
+
+    signal.signal(signal.SIGTERM, handler)
+    return flag
+
+
+def train(
+    cfg: TrainConfig,
+    env: MkwDolphinEnv | None = None,
+    resume_from: Path | str | None = None,
+) -> BTRAgent:
     """Main training driver. Constructs agent, runs episodes until
-    ``total_frames`` env steps, logs + checkpoints per config cadence."""
+    ``total_frames`` env steps, logs + checkpoints per config cadence.
+
+    ``resume_from``: path to a ``_save_checkpoint`` output; if provided, the
+    agent's weights/optimizer/counters are restored before training resumes.
+    Replay is re-warmed from scratch (see ``load_checkpoint`` docstring).
+    """
+    # Seed all RNGs BTRAgent.build doesn't cover. torch + numpy are seeded in
+    # BTRAgent.build; stdlib random is covered here for any transitive deps.
+    random.seed(cfg.seed)
+
     agent = BTRAgent.build(cfg)
+    if resume_from is not None:
+        load_checkpoint(agent, resume_from)
+
     run_name = time.strftime("btr_%Y%m%d_%H%M%S")
     logger = make_logger(cfg, run_name)
     log.info("starting training — run=%s device=%s", run_name, cfg.device)
@@ -720,21 +900,74 @@ def train(cfg: TrainConfig, env: MkwDolphinEnv | None = None) -> BTRAgent:
             track_metadata_path=cfg.track_metadata_path,
         )
 
+    shutdown_flag = _install_shutdown_handler()
     episode_idx = 0
+    env_crash_streak = 0
+    MAX_ENV_CRASHES = 5
+    last_warmup_log_env_steps = 0
     try:
-        while agent.env_steps < cfg.total_frames:
+        while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
             track_slug = agent.sampler.sample()
-            ep_return, rb_sums, n_steps = run_one_episode(agent, env, track_slug)
+
+            # Env-level crash recovery: socket EOFError / BrokenPipeError /
+            # ConnectionResetError indicate Dolphin died or the IPC socket
+            # dropped. Tear down + relaunch; abort if crashes cluster.
+            try:
+                ep_return, rb_sums, n_steps = run_one_episode(
+                    agent, env, track_slug,
+                    logger=logger, shutdown_flag=shutdown_flag,
+                )
+                env_crash_streak = 0
+            except (EOFError, BrokenPipeError, ConnectionResetError, OSError) as exc:
+                env_crash_streak += 1
+                log.error(
+                    "env crashed mid-episode (%s); streak=%d/%d — relaunching Dolphin",
+                    exc, env_crash_streak, MAX_ENV_CRASHES,
+                )
+                if env_crash_streak >= MAX_ENV_CRASHES:
+                    raise RuntimeError(
+                        f"aborting: {MAX_ENV_CRASHES} consecutive env crashes. "
+                        "Dolphin is likely unrecoverable; check its log + savestate integrity."
+                    ) from exc
+                try:
+                    env.close()
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
+                # Fresh env; next iter will _ensure_running → relaunch.
+                env = MkwDolphinEnv(
+                    env_id=cfg.env_id,
+                    savestate_dir=cfg.savestate_dir,
+                    track_metadata_path=cfg.track_metadata_path,
+                )
+                continue
+
             agent.sampler.update(track_slug, ep_return)
             episode_idx += 1
 
-            # Logging: per-episode summary + per-track marker + sampler dist.
+            # Warmup progress log — replay capacity ratio is the key signal
+            # while waiting for min_sampling_size; emit prominently so users
+            # don't mistake a warming run for a stuck one.
+            replay_fill = agent.replay.capacity / max(cfg.min_sampling_size, 1)
+            if (
+                replay_fill < 1.0
+                and agent.env_steps - last_warmup_log_env_steps >= max(cfg.min_sampling_size // 20, 100)
+            ):
+                log.info(
+                    "warmup: replay=%d/%d (%.1f%%) env_steps=%d",
+                    agent.replay.capacity, cfg.min_sampling_size,
+                    100.0 * replay_fill, agent.env_steps,
+                )
+                last_warmup_log_env_steps = agent.env_steps
+
             metrics: dict[str, float] = {
                 "episode/return": ep_return,
                 "episode/length": n_steps,
                 f"track/{track_slug}/episode_return": ep_return,
                 f"track/{track_slug}/episode_length": n_steps,
                 "env_steps": agent.env_steps,
+                "grad_steps": agent.grad_steps,
+                "replay/capacity": agent.replay.capacity,
+                "replay/fill_ratio": replay_fill,
             }
             for comp, val in rb_sums.items():
                 metrics[f"reward/{comp}"] = val
@@ -742,27 +975,30 @@ def train(cfg: TrainConfig, env: MkwDolphinEnv | None = None) -> BTRAgent:
                 metrics[f"track_sampler/{slug}/weight"] = weight
             logger.log(metrics, step=agent.env_steps)
 
-            # Checkpoint.
             if (
                 agent.grad_steps > 0
                 and agent.grad_steps % cfg.checkpoint_every_grad_steps == 0
             ):
                 ckpt_path = Path(cfg.log_dir) / f"{run_name}_grad{agent.grad_steps}.pt"
-                ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(
-                    {
-                        "online": agent.online_net.state_dict(),
-                        "target": agent.target_net.state_dict(),
-                        "optimizer": agent.optimizer.state_dict(),
-                        "grad_steps": agent.grad_steps,
-                        "env_steps": agent.env_steps,
-                        "config": cfg.__dict__,
-                    },
-                    ckpt_path,
-                )
-                log.info("saved checkpoint %s", ckpt_path)
+                _save_checkpoint(agent, cfg, ckpt_path)
+    except KeyboardInterrupt:
+        log.warning("KeyboardInterrupt — saving final checkpoint before exit")
+        shutdown_flag["shutdown"] = True
     finally:
-        env.close()
-        logger.close()
+        # Always emit a final checkpoint on exit (graceful shutdown, crash,
+        # or normal completion) so no training is lost between ckpt intervals.
+        try:
+            final_path = Path(cfg.log_dir) / f"{run_name}_final.pt"
+            _save_checkpoint(agent, cfg, final_path)
+        except Exception:  # noqa: BLE001 — don't mask the original exception
+            log.exception("failed to save final checkpoint")
+        try:
+            env.close()
+        except Exception:  # noqa: BLE001
+            log.exception("error closing env")
+        try:
+            logger.close()
+        except Exception:  # noqa: BLE001
+            log.exception("error closing logger")
 
     return agent

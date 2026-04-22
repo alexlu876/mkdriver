@@ -545,42 +545,41 @@ class PER:
         segment_starts = np.arange(batch_size) * segment_length
         samples = np.random.uniform(0.0, segment_length, [batch_size]) + segment_starts
         prios, start_idxs, tree_idxs = self.st.find(samples)
-        probs = prios / p_total
 
-        # Build RAW sequence indices (before any modular wrap). Validity is
-        # checked on the raw indices; the modular `seq_idxs` is only used for
-        # actually indexing pointer_mem once we know the window is valid.
-        #
-        # Earlier code did `(start + offset) % capacity` first and then tried
-        # to check `seq_idxs >= capacity` — which was dead code since modulo
-        # always produces values in [0, capacity). Pre-wrap sequences near
-        # capacity-1 would silently wrap to index 0 and stitch together two
-        # unrelated episodes. Fixed by deferring modulo until after validity.
-        raw_idxs = start_idxs[:, None] + np.arange(seq_len)[None, :]
-
-        # Reject any sequence whose window crosses the write head (wrapped
-        # buffer) or extends past the filled region (pre-wrap). The rejected
-        # batch is retried; see the `count` recursion below.
-        if self.capacity == self.size:
-            # Wrapped buffer: reject if any element lands on the write head,
-            # which marks the seam between new and stale trajectories.
-            seq_idxs = raw_idxs % self.capacity
-            invalid_mask = np.any(seq_idxs == self.point_mem_idx, axis=1)
+        # Refill invalid rows in place rather than re-rolling the whole batch.
+        # Old recursion re-sampled all B rows on any single invalid hit, which
+        # at small capacity (e.g. --testing with size=1024, seq_len=12) could
+        # spin to the retry cap spuriously. Targeted refill converges in O(1)
+        # retries and preserves valid rows' priority stratification.
+        MAX_ROW_RETRIES = 20
+        for _attempt in range(MAX_ROW_RETRIES):
+            raw_idxs = start_idxs[:, None] + np.arange(seq_len)[None, :]
+            if self.capacity == self.size:
+                seq_idxs = raw_idxs % self.capacity
+                invalid_mask = np.any(seq_idxs == self.point_mem_idx, axis=1)
+            else:
+                invalid_mask = np.any(raw_idxs >= self.capacity, axis=1)
+                seq_idxs = raw_idxs
+            if not invalid_mask.any():
+                break
+            # Re-roll only the bad rows: draw from the same stratified segments
+            # so priority coverage stays even.
+            bad = np.where(invalid_mask)[0]
+            bad_samples = (
+                np.random.uniform(0.0, segment_length, [len(bad)]) + segment_starts[bad]
+            )
+            bad_prios, bad_starts, bad_tree = self.st.find(bad_samples)
+            prios[bad] = bad_prios
+            start_idxs[bad] = bad_starts
+            tree_idxs[bad] = bad_tree
         else:
-            # Pre-wrap: reject if any raw index extends past the filled range.
-            # No modulo needed for valid starts — they all produce indices in
-            # [0, capacity) without wrapping.
-            invalid_mask = np.any(raw_idxs >= self.capacity, axis=1)
-            seq_idxs = raw_idxs  # guaranteed in [0, capacity) for valid rows
-
-        if invalid_mask.any():
-            if count >= 5:
-                raise RuntimeError(
-                    f"sample_sequences({batch_size=}, {seq_len=}) couldn't find "
-                    f"{batch_size} non-seam starts after 5 retries. Capacity may be "
-                    "too small relative to seq_len, or buffer is pathologically packed."
-                )
-            return self.sample_sequences(batch_size, seq_len, count + 1)
+            raise RuntimeError(
+                f"sample_sequences({batch_size=}, {seq_len=}) couldn't find "
+                f"{batch_size} non-seam starts after {MAX_ROW_RETRIES} row-refill "
+                "attempts. Capacity may be too small relative to seq_len, or "
+                "the buffer is pathologically packed."
+            )
+        probs = prios / p_total
 
         # Dereference pointer_mem in one flat pass for speed.
         flat_pointers = self.pointer_mem[seq_idxs.flatten()]  # (B*T,)
