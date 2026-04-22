@@ -595,6 +595,14 @@ class BTRAgent:
         for p in target.parameters():
             p.requires_grad = False
         target.disable_noise()  # target uses greedy (non-noisy) evaluation
+        # Eval mode stops ``nn.utils.parametrizations.spectral_norm`` from
+        # running power iteration + mutating ``_u``/``_v`` buffers on every
+        # forward. Without this, target's spectrally-normalized weight drifts
+        # (~6e-5 per forward, compounding) between ``sync_target`` calls even
+        # though its underlying ``.original`` weight is frozen — which
+        # contaminates the Munchausen `π_target = softmax(Q_target/τ)` at
+        # `entropy_tau=0.03` where tiny Q shifts matter.
+        target.eval()
 
         optimizer = torch.optim.Adam(
             online.parameters(),
@@ -641,6 +649,10 @@ class BTRAgent:
     def sync_target(self) -> None:
         self.target_net.load_state_dict(self.online_net.state_dict())
         self.target_net.disable_noise()
+        # Re-assert eval mode after load_state_dict — load_state_dict doesn't
+        # touch the training flag, but belt-and-braces against any future
+        # refactor that toggles it.
+        self.target_net.eval()
 
     def act(
         self,
@@ -930,6 +942,10 @@ def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
     agent.nonfinite_streak = int(ckpt.get("nonfinite_streak", 0))
     if "sampler_state" in ckpt:
         agent.sampler.load_state_dict(ckpt["sampler_state"])
+    # load_state_dict preserves the source module's training flag via its
+    # values but doesn't set the destination's mode. Re-assert target.eval()
+    # to keep spectral_norm power iteration + noise disabled on target.
+    agent.target_net.eval()
     log.info(
         "resumed from %s: grad_steps=%d env_steps=%d",
         path, agent.grad_steps, agent.env_steps,
@@ -1090,7 +1106,20 @@ def train(
                     aborted_due_to_divergence = True
                     log.error("training diverged — will save as _diverged.pt")
                 raise
-            except (EOFError, BrokenPipeError, ConnectionResetError, OSError) as exc:
+            except (
+                EOFError,
+                BrokenPipeError,
+                ConnectionResetError,
+                OSError,
+                # MkwDolphinEnv.reset raises FileNotFoundError if a track's
+                # savestate goes missing (concurrent file deletion, or the
+                # sampler is ahead of the filesystem), and KeyError if
+                # track_metadata.yaml is missing an entry. Treat both as
+                # per-track failures — remove the slug after MAX_TRACK_CRASHES
+                # rather than killing the whole run.
+                FileNotFoundError,
+                KeyError,
+            ) as exc:
                 env_crash_streak += 1
                 track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
                 log.error(

@@ -493,9 +493,18 @@ class TestBTRAgentLearnStep:
 
         # Snapshot a weight-bearing online param (avoid NoisyLinear ε buffers —
         # those are resampled every forward and "change" on every step trivially).
+        # Snapshot only trainable FP32 Parameters (not buffers). Excludes:
+        # - NoisyLinear epsilon buffers (resample every forward, would
+        #   produce false-positive "weight changed" signal)
+        # - spectral_norm power-iteration buffers (`parametrizations.*._u`,
+        #   `._v`) which also update every forward in training mode
+        # With spectral_norm the actual trainable weight is at
+        # `parametrizations.weight.original{0,1}` — those ARE in
+        # named_parameters and WILL be caught here.
         snapshot = {
-            k: v.clone() for k, v in agent.online_net.state_dict().items()
-            if "weight" in k and "epsilon" not in k and v.dtype == torch.float32
+            name: p.detach().clone()
+            for name, p in agent.online_net.named_parameters()
+            if "epsilon" not in name and p.dtype == torch.float32
         }
         assert snapshot, "test helper assumption: at least one weight param"
 
@@ -508,9 +517,9 @@ class TestBTRAgentLearnStep:
         assert "grad_norm" in m1 and np.isfinite(m1["grad_norm"])
 
         # Online weights should have shifted for at least one parameter.
-        after = agent.online_net.state_dict()
+        after = dict(agent.online_net.named_parameters())
         any_changed = any(
-            not torch.equal(after[k], v) for k, v in snapshot.items()
+            not torch.equal(after[name].detach(), v) for name, v in snapshot.items()
         )
         assert any_changed, "learn_step didn't alter any online weight"
 
@@ -989,3 +998,198 @@ class TestShutdownHandler:
         # Calling restore again when the handler is already cleaned up should no-op.
         restore()
         assert _signal.getsignal(_signal.SIGTERM) is pre
+
+
+# ---------------------------------------------------------------------------
+# Round-4 coverage: spectral_norm / LayerNorm / NaN priority / prod checkpoint.
+# ---------------------------------------------------------------------------
+
+
+class TestSpectralNormPresence:
+    """Verify cfg.spectral_norm actually materializes parametrizations."""
+
+    def _count_spectral_norms(self, policy: torch.nn.Module) -> int:
+        # nn.utils.parametrizations.spectral_norm attaches a ParametrizationList
+        # at module.parametrizations with a "weight" key.
+        return sum(
+            1
+            for m in policy.modules()
+            if hasattr(m, "parametrizations") and "weight" in m.parametrizations
+        )
+
+    def test_default_cfg_has_spectral_norm(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path, spectral_norm=True)
+        agent = BTRAgent.build(cfg)
+        # Encoder has 3 block.conv + 3 blocks × 2 residual blocks × 2 convs = 15.
+        assert self._count_spectral_norms(agent.online_net) == 15
+
+    def test_disabled_has_no_spectral_norm(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path, spectral_norm=False)
+        agent = BTRAgent.build(cfg)
+        assert self._count_spectral_norms(agent.online_net) == 0
+
+
+class TestLayerNormPresence:
+    """Verify cfg.layer_norm attaches LayerNorm inside conv blocks."""
+
+    def test_enabled_materializes_conv_block_ln(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path, layer_norm=True)
+        agent = BTRAgent.build(cfg)
+        enc = agent.online_net.encoder
+        for blk in (enc.block1, enc.block2, enc.block3):
+            assert isinstance(blk.norm, torch.nn.LayerNorm), (
+                f"expected LayerNorm, got {type(blk.norm).__name__}"
+            )
+
+    def test_disabled_keeps_identity(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path, layer_norm=False)
+        agent = BTRAgent.build(cfg)
+        enc = agent.online_net.encoder
+        for blk in (enc.block1, enc.block2, enc.block3):
+            assert isinstance(blk.norm, torch.nn.Identity)
+
+
+class TestTargetEvalMode:
+    """Verify target net is in eval() mode — prevents spectral_norm drift."""
+
+    def test_target_starts_in_eval(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        assert not agent.target_net.training, "target must be in eval mode"
+
+    def test_sync_target_keeps_eval(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        agent.target_net.train()  # simulate a stray .train()
+        agent.sync_target()
+        assert not agent.target_net.training
+
+    def test_target_spectral_norm_no_drift_across_forwards(self, tmp_path: Path) -> None:
+        """With target.eval(), spectral_norm power iteration stops updating
+        _u/_v buffers — target's effective weight stays fixed between syncs."""
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path, spectral_norm=True)
+        agent = BTRAgent.build(cfg)
+        # Capture all buffers named "_u" / "_v" across every parametrization.
+        def snapshot() -> dict[str, torch.Tensor]:
+            return {
+                n: b.detach().clone()
+                for n, b in agent.target_net.named_buffers()
+                if n.endswith("._u") or n.endswith("._v")
+            }
+
+        before = snapshot()
+        assert before, "test assumes there IS at least one spectral_norm buffer"
+
+        # Several forwards with dummy input.
+        x = torch.zeros(1, 1, cfg.stack_size, cfg.imagey, cfg.imagex, dtype=torch.uint8)
+        with torch.no_grad():
+            for _ in range(5):
+                agent.target_net(x)
+
+        after = snapshot()
+        for name in before:
+            assert torch.equal(before[name], after[name]), (
+                f"target {name} drifted despite eval mode"
+            )
+
+
+class TestNanPriorityTreeValue:
+    """Verify NaN-priority placeholder lands at eps in the SumTree, not eps**alpha."""
+
+    def test_nan_priority_replaced_lands_at_eps(self, tmp_path: Path) -> None:
+        _ = tmp_path
+        from mkw_rl.rl.replay import PER
+
+        per = PER(
+            size=32, device="cpu", n=1, envs=1, gamma=0.99, alpha=0.2,
+            framestack=4, imagex=30, imagey=20,
+        )
+        state = np.zeros((4, 20, 30), dtype=np.uint8)
+        for i in range(10):
+            per.append(state, action=i % 4, reward=1.0, n_state=state,
+                       done=False, trun=False, stream=0)
+
+        # Inject a NaN priority at tree_idx 0 (first leaf).
+        tree_idx = per.st.tree_start
+        per.update_priorities(np.array([tree_idx]), np.array([float("nan")]))
+        leaf_val = per.st.sum_tree[tree_idx]
+        # Placeholder = eps ** (1/alpha); then ** alpha inside update_priorities
+        # gives eps. Without the round-3 fix, the tree value would be eps**alpha
+        # ≈ 0.063 at alpha=0.2, eps=1e-6 — ~60000× too high.
+        assert abs(leaf_val - per.eps) < per.eps * 0.01, (
+            f"NaN-placeholder tree value {leaf_val} should be ~eps={per.eps}; "
+            f"eps**alpha would be {per.eps ** per.alpha}"
+        )
+
+    def test_regular_priority_lands_at_priority_pow_alpha(self, tmp_path: Path) -> None:
+        """Sanity check the companion path: normal priorities go through ^alpha."""
+        _ = tmp_path
+        from mkw_rl.rl.replay import PER
+
+        per = PER(
+            size=32, device="cpu", n=1, envs=1, gamma=0.99, alpha=0.2,
+            framestack=4, imagex=30, imagey=20,
+        )
+        state = np.zeros((4, 20, 30), dtype=np.uint8)
+        for i in range(5):
+            per.append(state, action=i % 4, reward=1.0, n_state=state,
+                       done=False, trun=False, stream=0)
+        tree_idx = per.st.tree_start
+        raw_prio = 10.0
+        per.update_priorities(np.array([tree_idx]), np.array([raw_prio]))
+        expected = (raw_prio + per.eps) ** per.alpha
+        assert abs(per.st.sum_tree[tree_idx] - expected) < 1e-5
+
+
+class TestCheckpointRoundTripProductionFlags:
+    """Ensure production arch flags (spectral_norm + layer_norm) round-trip
+    through _save_checkpoint → load_checkpoint without silent state loss."""
+
+    def test_round_trip_with_spectral_and_ln(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent, _save_checkpoint, load_checkpoint
+
+        cfg = _tiny_cfg(tmp_path, spectral_norm=True, layer_norm=True)
+        agent = BTRAgent.build(cfg)
+        # Mutate a conv-encoder parameter (exercises the spectral_norm
+        # parametrization path).
+        param_name, param = next(
+            (n, p) for n, p in agent.online_net.named_parameters()
+            if "block1.conv" in n and "original" in n and p.dtype == torch.float32
+        )
+        with torch.no_grad():
+            param.add_(13.0)
+        agent.grad_steps = 77
+        agent.env_steps = 1234
+
+        ckpt_path = tmp_path / "prod.pt"
+        _save_checkpoint(agent, cfg, ckpt_path)
+
+        fresh = BTRAgent.build(cfg)
+        fresh_before = dict(fresh.online_net.named_parameters())[param_name].detach().clone()
+        assert not torch.equal(
+            fresh_before, dict(agent.online_net.named_parameters())[param_name].detach(),
+        )
+
+        load_checkpoint(fresh, ckpt_path)
+        a_sd = agent.online_net.state_dict()
+        f_sd = fresh.online_net.state_dict()
+        assert set(a_sd) == set(f_sd)
+        for k in a_sd:
+            assert torch.equal(a_sd[k], f_sd[k]), f"mismatch at key {k}"
+        assert not fresh.target_net.training
+        assert fresh.grad_steps == 77
+        assert fresh.env_steps == 1234
