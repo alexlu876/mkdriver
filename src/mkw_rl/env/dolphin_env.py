@@ -205,12 +205,21 @@ class MkwDolphinEnv(gym.Env):
             raise FileNotFoundError(f"Dolphin binary not found: {inner}")
         return inner
 
+    @staticmethod
+    def _find_xvfb_run() -> str | None:
+        """Return the path to ``xvfb-run`` if present on PATH, else None."""
+        import shutil  # noqa: PLC0415 — local import
+        return shutil.which("xvfb-run")
+
     def _launch_dolphin(self) -> None:
         """Launch Dolphin with our slave script attached.
 
-        On Linux, sets ``QT_QPA_PLATFORM=offscreen`` so the emulator runs
-        without a display server (required on Vast.ai). On macOS, a visible
-        window is expected (dev-machine only).
+        On Linux, wraps the binary with ``xvfb-run`` to provide a virtual X
+        display — ``dolphin-emu-nogui`` still initializes a Qt platform
+        plugin and a video backend that both need an X server, even in
+        headless mode (``QT_QPA_PLATFORM=offscreen`` alone is not
+        sufficient). Vast.ai images include Xvfb via apt; we require it.
+        On macOS a visible window is expected (dev-machine only).
         """
         inner_binary = self._resolve_inner_binary()
 
@@ -218,9 +227,23 @@ class MkwDolphinEnv(gym.Env):
         env["MKW_RL_ENV_ID"] = str(self.env_id)
         env["MKW_RL_SRC"] = str(self._mkw_rl_src)
 
+        xvfb_prefix: list[str] = []
         if platform.system() == "Linux":
-            # Headless Qt — required on Vast.ai / any host without a display.
+            # Still set offscreen QPA as belt-and-braces; our real headless
+            # strategy is the xvfb-run wrapper below.
             env.setdefault("QT_QPA_PLATFORM", "offscreen")
+            xvfb_run = self._find_xvfb_run()
+            if xvfb_run is None:
+                raise FileNotFoundError(
+                    "xvfb-run not found on PATH. Install with `apt-get install "
+                    "xvfb` — it's required for headless Dolphin on Linux since "
+                    "the binary still requests an X display for Qt + video init."
+                )
+            # -a auto-selects a free display number; `-s` sets the virtual screen
+            # size (doesn't affect our observations — we read framebuffer via
+            # event.framedrawn, not the Qt window). Each env_id gets its own
+            # Xvfb instance, so multi-env launches don't collide on :99.
+            xvfb_prefix = [xvfb_run, "-a", "-s", "-screen 0 1024x768x24"]
 
         # Forward our training venv's site-packages so Dolphin's embedded
         # Python can import numpy, Pillow, etc. (pure-Python deps + C
@@ -240,6 +263,7 @@ class MkwDolphinEnv(gym.Env):
             )
 
         cmd = [
+            *xvfb_prefix,
             str(inner_binary),
             "--no-python-subinterpreters",
             "--script",
