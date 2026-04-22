@@ -78,7 +78,11 @@ class SumTree:
         self.full = False  # tracks whether we've wrapped around
         # Put all used node leaves on the last tree level.
         self.tree_start = 2 ** (size - 1).bit_length() - 1
-        self.sum_tree = np.zeros((self.tree_start + self.size,), dtype=np.float32)
+        # float64 to avoid drift: with size=1M leaves and 10M+ updates, repeated
+        # sum propagation accumulates FP error that biases ``find(v)`` toward
+        # late leaves. float64 eliminates this at 2× memory (16 MB total for
+        # size=1M — trivial relative to the replay frame pool).
+        self.sum_tree = np.zeros((self.tree_start + self.size,), dtype=np.float64)
         self.max = 1  # initial max value to return (1 = 1^ω)
 
     # Update node values from current tree (vectorized helper).
@@ -551,12 +555,41 @@ class PER:
         # at small capacity (e.g. --testing with size=1024, seq_len=12) could
         # spin to the retry cap spuriously. Targeted refill converges in O(1)
         # retries and preserves valid rows' priority stratification.
+        #
+        # Seam rejection — the write head ``W = point_mem_idx`` marks the
+        # boundary between the newest-written transition (at ``W-1``, latest
+        # in time) and the oldest surviving transition (at ``W``, about to be
+        # overwritten). Walking the buffer forward in INDEX space:
+        #
+        #   index:  ... W-2, W-1, W,   W+1, W+2, ...   (mod capacity)
+        #   time:   ... t-2, t-1, t_old, t_old+1, ...
+        #
+        # The forward transition W-1 → W is the ONLY time discontinuity:
+        # "newest write" jumps back to "oldest write". Every other forward
+        # step in index space is also a forward step in time (once we mod
+        # back around to W-1 from the other side, we continue contiguously).
+        #
+        # A sequence starting at ``s`` with length ``seq_len`` crosses this
+        # seam iff W-1 appears in positions [s .. s+seq_len-2] — i.e. iff
+        # the sequence will try to step from index W-1 to index W within its
+        # window. Equivalently: ``dist = (W - s) % capacity``; reject iff
+        # ``0 < dist < seq_len``.
+        #
+        # Edge case ``dist == 0`` (s == W) is VALID — the sequence starts at
+        # the oldest surviving transition and walks forward into more middle-
+        # aged data, all contiguous in time. Only ``dist >= 1`` with
+        # ``dist < seq_len`` indicates the sequence will cross the seam.
+        #
+        # The previous check ``seq_idxs == W`` caught the common case (sequence
+        # contains W) but was noisy around wrap boundaries. The distance form
+        # is simpler and well-defined without special-casing the modulus.
         MAX_ROW_RETRIES = 20
         for _attempt in range(MAX_ROW_RETRIES):
             raw_idxs = start_idxs[:, None] + np.arange(seq_len)[None, :]
             if self.capacity == self.size:
                 seq_idxs = raw_idxs % self.capacity
-                invalid_mask = np.any(seq_idxs == self.point_mem_idx, axis=1)
+                dist = (self.point_mem_idx - start_idxs) % self.capacity
+                invalid_mask = (dist > 0) & (dist < seq_len)
             else:
                 invalid_mask = np.any(raw_idxs >= self.capacity, axis=1)
                 seq_idxs = raw_idxs
@@ -684,24 +717,31 @@ class PER:
         # self._set_priority_min(idx - self.size + 1, sqrt(priority)) — see note above
 
         if np.isnan(priorities).any() or np.isinf(priorities).any():
-            # Surface as a loud log + replace NaN/±inf with eps. VIPTankz's code
-            # logged a warning but fell through to st.update with the bad values,
-            # corrupting the SumTree — subsequent sample() calls would raise
-            # OverflowError on np.random.uniform(0, NaN) or blow up stratified
-            # sampling with an astronomical +inf priority. Also handling ±inf
-            # because `-inf ** 0.2` re-introduces NaN post-exponentiation,
-            # defeating the NaN guard; positive inf becomes a priority so large
-            # it dominates all sampling until it decays.
+            # Surface as a loud log + replace NaN/±inf with a tiny placeholder
+            # that lands at eps AFTER the ``**alpha`` exponent applied below.
+            # VIPTankz's code logged a warning but fell through to st.update
+            # with the bad values, corrupting the SumTree.
+            #
+            # Subtlety: the tree stores ``p ** alpha`` with alpha=0.2, so
+            # substituting ``nan=eps`` directly produces a tree value of
+            # ``eps ** 0.2 ≈ 0.063``, which is relatively LARGE — the bad
+            # slots would end up oversampled, the opposite of intent. To hit
+            # a tree value of ``eps`` we pre-scale: substitute
+            # ``eps ** (1/alpha)`` so ``(eps ** (1/alpha)) ** alpha = eps``.
+            # At alpha=0.2, eps=1e-6, the placeholder is ``1e-30`` (fine in
+            # float64 priority space). Also handles ±inf for the same reason.
             import logging  # noqa: PLC0415 — local import, rarely hit
 
             n_bad = int(np.isnan(priorities).sum() + np.isinf(priorities).sum())
             logging.getLogger(__name__).warning(
                 "Non-finite priorities (%d entries); this usually means the loss "
-                "diverged. Replacing with eps to avoid SumTree corruption.",
+                "diverged. Replacing with ~eps placeholder to suppress sampling "
+                "of the affected sequences.",
                 n_bad,
             )
+            placeholder = self.eps ** (1.0 / self.alpha) if self.alpha > 0 else self.eps
             priorities = np.nan_to_num(
-                priorities, nan=self.eps, posinf=self.eps, neginf=self.eps
+                priorities, nan=placeholder, posinf=placeholder, neginf=placeholder
             )
 
         self.max_prio = max(self.max_prio, np.max(priorities))

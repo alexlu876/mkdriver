@@ -41,13 +41,32 @@ type LstmState = tuple[torch.Tensor, torch.Tensor]  # (h, c)
 # ---------------------------------------------------------------------------
 
 
-class _ImpalaResBlock(nn.Module):
-    """Two 3x3 convs with ReLU pre-activations and a residual add."""
+def _maybe_spectral_norm(conv: nn.Conv2d, use: bool) -> nn.Module:
+    """Wrap ``conv`` in ``nn.utils.parametrizations.spectral_norm`` when
+    ``use`` is True. Matches VIPTankz's BTR.py default (``spectral=True``).
 
-    def __init__(self, channels: int) -> None:
+    Spectral norm bounds the Lipschitz constant of the layer's linear map by
+    dividing the weight by its largest singular value (estimated via power
+    iteration stored in buffers ``_u`` / ``_v``). Load-bearing for BTR
+    training stability per the paper's ablations.
+    """
+    if use:
+        return nn.utils.parametrizations.spectral_norm(conv)
+    return conv
+
+
+class _ImpalaResBlock(nn.Module):
+    """Two 3x3 convs with ReLU pre-activations and a residual add. Convs may
+    optionally be spectral-normed (matches VIPTankz default)."""
+
+    def __init__(self, channels: int, use_spectral_norm: bool = False) -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv1 = _maybe_spectral_norm(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1), use_spectral_norm
+        )
+        self.conv2 = _maybe_spectral_norm(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1), use_spectral_norm
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.relu(x)
@@ -58,18 +77,34 @@ class _ImpalaResBlock(nn.Module):
 
 
 class _ImpalaBlock(nn.Module):
-    """IMPALA block: 3x3 conv → maxpool(3x3, s=2) → 2× residual blocks."""
+    """IMPALA block: 3x3 conv → maxpool(3x3, s=2) → [LayerNorm] → 2× residual
+    blocks. The optional post-pool LayerNorm and the conv spectral-norm
+    wrapping both match VIPTankz's defaults (BTR.py:148,153-154,162-163).
+    LayerNorm's spatial shape is attached post-init by the owning encoder
+    (which probes each block's output shape via a dummy forward)."""
 
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        use_spectral_norm: bool = False,
+    ) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv = _maybe_spectral_norm(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            use_spectral_norm,
+        )
         self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.res1 = _ImpalaResBlock(out_channels)
-        self.res2 = _ImpalaResBlock(out_channels)
+        # Placeholder Identity; replaced with nn.LayerNorm(shape) post-init when
+        # the encoder enables conv-block LN. Keeps shape invariant at probe time.
+        self.norm: nn.Module = nn.Identity()
+        self.res1 = _ImpalaResBlock(out_channels, use_spectral_norm=use_spectral_norm)
+        self.res2 = _ImpalaResBlock(out_channels, use_spectral_norm=use_spectral_norm)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
         x = self.pool(x)
+        x = self.norm(x)
         x = self.res1(x)
         x = self.res2(x)
         return x
@@ -81,7 +116,24 @@ class _ImpalaBlock(nn.Module):
 
 
 class ImpalaEncoder(nn.Module):
-    """IMPALA CNN → 256-dim feature vector per frame."""
+    """IMPALA CNN → ``feature_dim``-dim feature vector per frame.
+
+    Optional knobs to match VIPTankz/BTR defaults (off by default for BC
+    back-compat; BTR passes True for both):
+
+    - ``use_spectral_norm``: wrap all conv layers in ``nn.utils.parametrizations.spectral_norm``.
+      Bounds the Lipschitz constant of each conv; load-bearing for BTR
+      training stability per the ICML paper's ablations.
+    - ``layer_norm``: apply ``nn.LayerNorm`` on each block's post-pool feature
+      map (matches VIPTankz BTR.py:148,153-154,162-163). Spatial shapes are
+      probed via a dummy forward during init.
+
+    The final ``Linear(flat_dim → feature_dim) + ReLU`` bottleneck is an
+    mkw-rl v2 addition (VIPTankz's encoder feeds the flat conv features
+    directly into the IQN cos-embedding mixing with no learned compression).
+    We add this bottleneck so the downstream LSTM's input_size matches
+    ``feature_dim``; see docs/TRAINING_METHODOLOGY.md §2.
+    """
 
     def __init__(
         self,
@@ -89,20 +141,41 @@ class ImpalaEncoder(nn.Module):
         channels: tuple[int, int, int] = (16, 32, 32),
         feature_dim: int = 256,
         input_hw: tuple[int, int] = (75, 140),
+        use_spectral_norm: bool = False,
+        layer_norm: bool = False,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.feature_dim = feature_dim
 
         c1, c2, c3 = channels
-        self.block1 = _ImpalaBlock(in_channels, c1)
-        self.block2 = _ImpalaBlock(c1, c2)
-        self.block3 = _ImpalaBlock(c2, c3)
+        self.block1 = _ImpalaBlock(in_channels, c1, use_spectral_norm=use_spectral_norm)
+        self.block2 = _ImpalaBlock(c1, c2, use_spectral_norm=use_spectral_norm)
+        self.block3 = _ImpalaBlock(c2, c3, use_spectral_norm=use_spectral_norm)
 
-        # Probe flatten dim with a dummy forward.
+        # Two-phase probe: first get each block's post-pool shape (for LN
+        # attachment), then compute flat_dim. Blocks currently have norm=Identity
+        # so the probed shapes are correct regardless of whether LN is enabled.
         with torch.no_grad():
             dummy = torch.zeros(1, in_channels, *input_hw)
-            flat_dim = self._forward_conv(dummy).flatten(1).shape[1]
+            post_pool_shapes: list[torch.Size] = []
+            y = dummy
+            for blk in (self.block1, self.block2, self.block3):
+                y = blk.conv(y)
+                y = blk.pool(y)
+                post_pool_shapes.append(y.shape[1:])  # (C, H, W)
+                y = blk.res1(blk.norm(y))
+                y = blk.res2(y)
+            y = F.relu(y)
+            flat_dim = y.flatten(1).shape[1]
+
+        if layer_norm:
+            # LayerNorm across (C, H, W) — matches VIPTankz's "normalized_shape"
+            # arg passing the full post-pool feature-map shape.
+            self.block1.norm = nn.LayerNorm(list(post_pool_shapes[0]))
+            self.block2.norm = nn.LayerNorm(list(post_pool_shapes[1]))
+            self.block3.norm = nn.LayerNorm(list(post_pool_shapes[2]))
+
         self.linear = nn.Linear(flat_dim, feature_dim)
 
     def _forward_conv(self, x: torch.Tensor) -> torch.Tensor:

@@ -23,6 +23,18 @@ findings from the 2026-04-21 forensic audit applied inline (see the
    non-stationary; VIPTankz's 500 was Atari-tuned).
 5. Exploration: we drop the 100M-frame ε-disable schedule — noisy-nets
    handles exploration by construction.
+6. Target net has noise permanently disabled (VIPTankz resamples per
+   learn step). Keeps Munchausen's `π_target = softmax(Q_target/τ)`
+   deterministic within a batch.
+7. Target LSTM burn-in runs on `n_states[:, :burn_in]` (not `states[...]`)
+   so the target's hidden is aligned to its learning-window inputs,
+   which come from the n-step-shifted state sequence.
+8. Scalar `γ^n_step` bootstrap discount — over-discounts n-step windows
+   clipped by `trun` (without `done`). Impact is small at n=3 for
+   MKWii's ~1000-frame episodes; matches VIPTankz.
+
+See `docs/TRAINING_METHODOLOGY.md` "Inherited implementation quirks" for
+the full list (items 7-15) with paper references.
 """
 
 from __future__ import annotations
@@ -80,7 +92,7 @@ class TrainConfig:
     # model (forwarded into BTRConfig)
     stack_size: int = 4
     input_hw: tuple[int, int] = (75, 140)
-    encoder_channels: tuple[int, int, int] = (16, 32, 32)
+    encoder_channels: tuple[int, int, int] = (32, 64, 64)  # VIPTankz model_size=2 default
     feature_dim: int = 256
     lstm_hidden: int = 512
     lstm_layers: int = 1
@@ -88,6 +100,7 @@ class TrainConfig:
     num_tau: int = 8
     n_cos: int = 64
     layer_norm: bool = True
+    spectral_norm: bool = True  # wraps every conv in spectral_norm (VIPTankz default)
 
     # replay
     replay_size: int = 1_048_576
@@ -174,7 +187,7 @@ def load_config(path: str | Path, testing: bool = False) -> TrainConfig:
     if "model" in raw:
         for k in (
             "stack_size", "feature_dim", "lstm_hidden", "lstm_layers",
-            "linear_size", "num_tau", "n_cos", "layer_norm",
+            "linear_size", "num_tau", "n_cos", "layer_norm", "spectral_norm",
         ):
             if k in raw["model"]:
                 kw[k] = raw["model"][k]
@@ -575,6 +588,7 @@ class BTRAgent:
             num_tau=cfg.num_tau,
             n_cos=cfg.n_cos,
             layer_norm=cfg.layer_norm,
+            spectral_norm=cfg.spectral_norm,
         )
         online = BTRPolicy(model_cfg).to(device)
         target = copy.deepcopy(online)

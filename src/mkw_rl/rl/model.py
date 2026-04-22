@@ -53,14 +53,27 @@ class BTRConfig:
     n_actions: int = 40  # matches VIPTankz's Discrete(40) action space
     stack_size: int = 4
     input_hw: tuple[int, int] = (75, 140)
-    encoder_channels: tuple[int, int, int] = (16, 32, 32)
+    # Channel counts matching VIPTankz's default ``model_size=2`` → (32, 64, 64).
+    # The IMPALA paper's Fig 3 "large" baseline is (16, 32, 32), but VIPTankz's
+    # published BTR results use 2× those widths. We match VIPTankz so our
+    # training run compares apples-to-apples to the ICML paper's numbers.
+    encoder_channels: tuple[int, int, int] = (32, 64, 64)
     feature_dim: int = 256  # encoder output / LSTM input
     lstm_hidden: int = 512  # LSTM output / IQN dueling input
     lstm_layers: int = 1
     linear_size: int = 512  # dueling branch intermediate
     num_tau: int = 8  # quantile samples per forward (IQN)
     n_cos: int = 64  # cosine embedding dim for IQN τ
-    layer_norm: bool = True  # LayerNorm inside dueling branches (VIPTankz default True on CUDA)
+    # LayerNorm placement: VIPTankz applies LN both (a) inside each IMPALA
+    # conv block on the post-pool feature map AND (b) inside the dueling
+    # branches. When ``layer_norm=True`` we match both. Prior versions only
+    # applied (b), which was a silent architectural deviation vs the reference.
+    layer_norm: bool = True
+    # Spectral-norm wrapping on every conv (encoder block + residual convs).
+    # VIPTankz default is ``spectral=True``; without it, BTR can diverge on
+    # harder environments. Disable only for ablation / weight-transfer with
+    # a non-spectral checkpoint.
+    spectral_norm: bool = True
 
 
 class _DuelingBranch(nn.Module):
@@ -117,6 +130,8 @@ class BTRPolicy(nn.Module):
             channels=self.cfg.encoder_channels,
             feature_dim=self.cfg.feature_dim,
             input_hw=self.cfg.input_hw,
+            use_spectral_norm=self.cfg.spectral_norm,
+            layer_norm=self.cfg.layer_norm,
         )
 
         self.lstm = nn.LSTM(

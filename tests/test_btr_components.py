@@ -485,6 +485,60 @@ class TestPERSampleSequences:
             _, states, *_ = per.sample_sequences(4, 8)
             assert states.shape == (4, 8, 4, 20, 30)
 
+    def test_post_wrap_sequences_have_contiguous_actions(self) -> None:
+        """Regression test for round-3 audit: after the buffer wraps, the
+        distance-based seam rejection must catch sequences that straddle
+        the W-1 → W boundary (jump from newest-written to oldest-surviving).
+        Actions are appended as ``i % 4``, so consecutive transitions differ
+        by +1 or -3. A seam-crossing sequence would show a different diff
+        wherever the straddle happens.
+        """
+        per = self._make_per(size=64, n=1)
+        self._fill(per, 500)  # wraps ~8× so write head is well past position 0
+        assert per.capacity == per.size
+
+        # 30 draws × 8 sequences each × 7 diffs = ~1700 diff checks. Previous
+        # (buggy) code only rejected sequences CONTAINING W; a sequence
+        # straddling W via wrap would slip through and produce a non-(+1,-3)
+        # diff. The fixed distance-based check rejects every straddler.
+        for _ in range(30):
+            _, _, actions, *_ = per.sample_sequences(8, seq_len=8)
+            for b in range(actions.shape[0]):
+                diffs = (actions[b, 1:] - actions[b, :-1]).cpu().numpy()
+                assert all(
+                    d in (1, -3) for d in diffs
+                ), f"seam-crossing sequence (wrapped case): actions={actions[b]}"
+
+    def test_start_at_write_head_is_accepted(self) -> None:
+        """Edge case: ``dist == 0`` (start == W) is NOT a seam crossing — the
+        sequence walks forward into oldest-surviving data, all contiguous in
+        time. An over-aggressive distance check (``dist < seq_len``) would
+        reject this; the correct check is ``0 < dist < seq_len``."""
+        per = self._make_per(size=64, n=1)
+        self._fill(per, 500)  # wrapped
+        W = per.point_mem_idx
+        assert W < per.capacity
+
+        # Repeatedly bias the start toward W via priority boost and confirm
+        # it's sampled + returns a valid (no-gap) sequence. We can't easily
+        # force start == W directly without poking internals, so rely on the
+        # draw distribution: with high enough priority on transition W, the
+        # boosted transition will be picked as start on most draws.
+        per.update_priorities(
+            np.array([W + per.st.tree_start]), np.array([1e10]),
+        )
+        found_w_start = False
+        for _ in range(100):
+            tree_idxs, _, actions, *_ = per.sample_sequences(4, seq_len=4)
+            for b in range(actions.shape[0]):
+                if tree_idxs[b] == W + per.st.tree_start:
+                    found_w_start = True
+                    diffs = (actions[b, 1:] - actions[b, :-1]).cpu().numpy()
+                    assert all(d in (1, -3) for d in diffs), (
+                        f"start-at-W sequence should be valid: actions={actions[b]}"
+                    )
+        assert found_w_start, "priority-boosted W start was never sampled"
+
     def test_n_step_discount_applied_per_timestep(self) -> None:
         """With n_step=3 and rewards=1.0 everywhere (no terminal), every
         element of the returned rewards tensor should be the standard

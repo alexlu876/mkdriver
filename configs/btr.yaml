@@ -21,14 +21,21 @@ model:
   # Architecture (passes 1+2). Must stay in sync with src/mkw_rl/rl/model.py BTRConfig.
   stack_size: 4
   input_hw: [75, 140]
-  encoder_channels: [16, 32, 32]
+  # Channel widths match VIPTankz model_size=2 default (ICML 2025 paper run).
+  # The IMPALA paper's Fig 3 "large" uses (16, 32, 32) — VIPTankz trains at 2×.
+  encoder_channels: [32, 64, 64]
   feature_dim: 256
   lstm_hidden: 512
   lstm_layers: 1
   linear_size: 512
   num_tau: 8
   n_cos: 64
-  layer_norm: true                           # on for CUDA; --override layer_norm=false for MPS
+  # LayerNorm applies to BOTH conv blocks (post-pool feature maps) and dueling
+  # branches (matches VIPTankz BTR.py). On for CUDA; --override layer_norm=false for MPS.
+  layer_norm: true
+  # Spectral-norm wrapping on every conv (encoder block + residual convs) —
+  # VIPTankz default, load-bearing for BTR training stability.
+  spectral_norm: true
 
 replay:
   size: 1048576                              # 1M transitions (pointer table), VIPTankz default
