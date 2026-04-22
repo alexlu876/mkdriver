@@ -118,6 +118,7 @@ def _state(
     touching_offroad: bool = False,
     wall_collide: int = 0,
     offroad_invincibility: int = 0,
+    kart_speed: float = 0.0,
 ) -> RaceState:
     return RaceState(
         race_completion=race_completion,
@@ -127,6 +128,7 @@ def _state(
         touching_offroad=touching_offroad,
         wall_collide=wall_collide,
         offroad_invincibility=offroad_invincibility,
+        kart_speed=kart_speed,
     )
 
 
@@ -188,21 +190,25 @@ class TestCheckpointReward:
         assert rb.checkpoint >= 3 * t.per_hit_base
         assert rb.checkpoint <= 3 * t.per_hit_base * t.config.speed_bonus_max
 
-    def test_speed_bonus_higher_for_faster_hits(self) -> None:
-        # Fast hit: one frame of gap. Slow hit: expected_frames_per_checkpoint
-        # frames of gap.
+    def test_speed_bonus_higher_for_faster_kart(self) -> None:
+        """Round-5 change: speed_bonus scales with RaceState.kart_speed
+        (from RAM) instead of inter-checkpoint pace. Faster kart → bigger
+        reward multiplier at the crossing."""
         t_fast = TrackRewardTracker(_track())
         t_slow = TrackRewardTracker(_track())
 
-        # Fast: crosses first checkpoint after 1 frame.
-        rb_fast, _, _ = t_fast.step(_state(race_completion=1.015))
-
-        # Slow: sit on 1.005 for many frames, then cross.
-        for _ in range(t_slow.expected_frames_per_checkpoint):
-            t_slow.step(_state(race_completion=1.005))
-        rb_slow, _, _ = t_slow.step(_state(race_completion=1.015))
+        # Same time gap, different kart speeds at the moment of crossing.
+        rb_fast, _, _ = t_fast.step(_state(race_completion=1.015, kart_speed=120.0))
+        rb_slow, _, _ = t_slow.step(_state(race_completion=1.015, kart_speed=10.0))
 
         assert rb_fast.checkpoint > rb_slow.checkpoint
+
+    def test_speed_bonus_clamped_at_max(self) -> None:
+        """Very high kart_speed should still clamp at speed_bonus_max."""
+        t = TrackRewardTracker(_track())
+        rb, _, _ = t.step(_state(race_completion=1.015, kart_speed=10_000.0))
+        # raw_bonus = 1 + alpha * (10000/100) = 51; clamped at speed_bonus_max (2.0)
+        assert rb.checkpoint <= t.per_hit_base * t.config.speed_bonus_max + 1e-9
 
 
 class TestPenalties:
@@ -248,6 +254,41 @@ class TestFinishBonus:
         rb1, _, _ = t1.step(_state(race_completion=4.0, race_position=1))
         rb12, _, _ = t12.step(_state(race_completion=4.0, race_position=12))
         assert rb1.position > rb12.position
+
+
+class TestAbortedRace:
+    """Round-5 addition: stage==4 without race_completion>=4 means the kart
+    fell off the map. Terminate with death_penalty per VIPTankz."""
+
+    def test_stage_4_without_finish_terminates_with_penalty(self) -> None:
+        t = TrackRewardTracker(_track())
+        rb, terminated, truncated = t.step(
+            _state(race_completion=1.5, race_stage=4, race_position=5),
+        )
+        assert terminated
+        assert not truncated
+        assert rb.finish == RewardConfig().death_penalty
+        assert rb.finish < 0  # negative penalty
+
+    def test_stage_4_with_finish_prefers_finish_bonus(self) -> None:
+        """If both conditions fire in one step, the finish branch wins
+        (higher reward + correct semantics — the race actually ended
+        successfully)."""
+        t = TrackRewardTracker(_track())
+        rb, terminated, _ = t.step(
+            _state(race_completion=4.0, race_stage=4, race_position=1),
+        )
+        assert terminated
+        assert rb.finish == RewardConfig().finish_bonus
+        assert rb.finish > 0
+
+    def test_aborted_race_fires_once(self) -> None:
+        t = TrackRewardTracker(_track())
+        rb1, term1, _ = t.step(_state(race_completion=1.5, race_stage=4))
+        assert term1 and rb1.finish == RewardConfig().death_penalty
+        # Subsequent steps don't re-emit the penalty.
+        rb2, _, _ = t.step(_state(race_completion=1.5, race_stage=4))
+        assert rb2.finish == 0.0
 
 
 class TestResetThreshold:

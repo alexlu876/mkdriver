@@ -53,6 +53,20 @@ class RewardConfig:
     finish_bonus: float = 10.0
     position_bonus_scale: float = 0.5  # (13 - pos) × scale; 13 matches VIPTankz's formula
 
+    # Aborted-race penalty. When ``race_stage == 4`` fires WITHOUT
+    # ``race_completion >= 4.0``, the kart fell off the map (bottomless-pit
+    # tracks: Rainbow Road, Grumble Volcano, Bowser's Castle). VIPTankz
+    # terminates with -1.0 here. Without this, the agent only gets the
+    # accumulated off-road penalty before truncation at reset_threshold_frames.
+    death_penalty: float = -1.0
+
+    # Kart speed reference used to normalize ``state.kart_speed`` into the
+    # speed bonus multiplier. The speed memory value is empirically ~0-130 on
+    # MKWii during normal racing; 100 puts the bonus at ~speed_bonus_max near
+    # top speed and ~1.0 at stall. No published formula; tune if reward signal
+    # skews weird. See ``docs/TRAINING_METHODOLOGY.md`` deviation 16.
+    speed_bonus_reference: float = 100.0
+
     # Lenient reset threshold, expressed in frames since the last checkpoint
     # hit. At PAL 50 fps, 750 frames = 15 seconds — matches v2's "1s progress
     # per 15s" spirit since checkpoints are dense enough to cross one per
@@ -87,6 +101,11 @@ class RaceState:
     touching_offroad: bool
     wall_collide: int  # non-zero = touching wall
     offroad_invincibility: int  # >0 = mushroom/boost protection from offroad
+    # Kart speed, f32 in Wii-internal units. Populated by
+    # ``dolphin_script._read_race_state`` from the physics engine's speed
+    # pointer. Defaults to 0.0 so reward computation works against tests that
+    # construct a RaceState without the speed field (regression-safe).
+    kart_speed: float = 0.0
 
 
 @dataclass
@@ -191,11 +210,14 @@ class TrackRewardTracker:
 
         # Checkpoint crossing — may cross multiple in a single frame at high speed.
         while state.race_completion > self.checkpoints[self.current_checkpoint]:
-            # Speed bonus: 1.0 → speed_bonus_max as elapsed → 0.
-            elapsed = self.frames_since_checkpoint
-            raw_bonus = 1.0 + self.config.speed_bonus_alpha * max(
-                0.0, 1.0 - elapsed / self.expected_frames_per_checkpoint
-            )
+            # Speed bonus: scales with actual kart speed at the moment of crossing.
+            # ``kart_speed`` is f32 in Wii-internal units (empirically 0-130 at
+            # normal racing; higher with mushroom/boost). ``speed_bonus_reference``
+            # normalizes it into a ~[0, 1] factor, then clamped at speed_bonus_max.
+            # Methodology §5 spec. Previous implementation used elapsed-frames
+            # which is a pace proxy, not true speed (documented deviation 16).
+            speed_factor = max(0.0, state.kart_speed / self.config.speed_bonus_reference)
+            raw_bonus = 1.0 + self.config.speed_bonus_alpha * speed_factor
             speed_bonus = min(raw_bonus, self.config.speed_bonus_max)
             breakdown.checkpoint += self.per_hit_base * speed_bonus
             self.current_checkpoint += 1
@@ -211,6 +233,15 @@ class TrackRewardTracker:
         if not self._finished and state.race_completion >= 4.0:
             breakdown.finish = self.config.finish_bonus
             breakdown.position = (13 - state.race_position) * self.config.position_bonus_scale
+            self._finished = True
+            terminated = True
+        # Aborted race — ``stage == 4`` without ``race_completion >= 4.0`` means
+        # the agent's kart fell off the map (bottomless-pit tracks). Terminate
+        # with a death penalty so the policy gets a clear "don't do that" signal
+        # instead of ~15 s of off-road-penalty accumulation before truncation.
+        # VIPTankz DolphinScript.py:514-516 equivalent.
+        elif not self._finished and state.race_stage == 4:
+            breakdown.finish = self.config.death_penalty
             self._finished = True
             terminated = True
 

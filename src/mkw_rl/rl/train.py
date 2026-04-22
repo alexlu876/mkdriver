@@ -138,6 +138,10 @@ class TrainConfig:
     log_dir: str = "runs/btr"
     log_every_grad_steps: int = 100
     checkpoint_every_grad_steps: int = 10_000
+    # Max number of periodic ``{run_name}_grad{N}.pt`` ckpts to retain.
+    # Older ones are pruned as new ones land. ``_final.pt`` and ``_diverged.pt``
+    # are never pruned (they mark run end-states). Set to 0 to disable rotation.
+    keep_last_n_checkpoints: int = 5
 
     # runtime
     device: str = "cpu"
@@ -227,7 +231,10 @@ def load_config(path: str | Path, testing: bool = False) -> TrainConfig:
             if src_k in raw["sampler"]:
                 kw[dst_k] = raw["sampler"][src_k]
     if "logging" in raw:
-        for k in ("wandb_project", "log_dir", "log_every_grad_steps", "checkpoint_every_grad_steps"):
+        for k in (
+            "wandb_project", "log_dir", "log_every_grad_steps",
+            "checkpoint_every_grad_steps", "keep_last_n_checkpoints",
+        ):
             if k in raw["logging"]:
                 kw[k] = raw["logging"][k]
     if "runtime" in raw:
@@ -812,6 +819,11 @@ class BTRAgent:
             "td_abs_mean": float(td_abs_bt.mean()),
             "grad_norm": float(grad_norm),
             "grad_steps": self.grad_steps,
+            # Include on the happy path (always 0 here) so the CSV/wandb
+            # column exists from step 1. Without this, the column only
+            # appears after the first non-finite event, breaking chart
+            # continuity when trying to diagnose divergence retrospectively.
+            "nonfinite_streak": self.nonfinite_streak,
         }
 
 
@@ -837,7 +849,15 @@ def run_one_episode(
 
     Returns (episode_return, reward_component_sums, n_steps).
     """
-    obs, info = env.reset(options={"track_slug": track_slug})
+    # Convert per-track-failure exceptions from env.reset into the narrow
+    # EnvResetFailed class so the outer train loop catches them alongside
+    # socket errors. Keeps the main exception net focused on "env is broken
+    # in a track-specific way" without swallowing generic bugs from deeper
+    # in run_one_episode / learn_step.
+    try:
+        obs, info = env.reset(options={"track_slug": track_slug})
+    except (FileNotFoundError, KeyError) as exc:
+        raise EnvResetFailed(f"reset failed for {track_slug!r}: {exc}") from exc
     # Env and replay both maintain framestacks. Sanity-check the env's stack
     # shape so a silent regression where the env starts returning single
     # frames (or differently-ordered stacks) would fail loudly here.
@@ -926,6 +946,30 @@ def _save_checkpoint(agent: BTRAgent, cfg: TrainConfig, path: Path) -> None:
     log.info("saved checkpoint %s (grad=%d env=%d)", path, agent.grad_steps, agent.env_steps)
 
 
+def _prune_old_checkpoints(log_dir: Path, run_name: str, keep_last_n: int) -> None:
+    """Delete all but the ``keep_last_n`` newest ``{run_name}_grad{N}.pt``
+    periodic checkpoints. Never touches ``_final.pt`` or ``_diverged.pt``.
+
+    A multi-day run with ``checkpoint_every_grad_steps=10_000`` and a ~75 MB
+    ckpt would otherwise fill ``log_dir`` unboundedly — typical Vast.ai
+    instances ship with 50-100 GB scratch. Rotation keeps disk pressure
+    bounded without requiring user intervention.
+    """
+    if keep_last_n <= 0:
+        return
+    pattern = f"{run_name}_grad*.pt"
+    candidates = sorted(log_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    if len(candidates) <= keep_last_n:
+        return
+    to_delete = candidates[:-keep_last_n]
+    for p in to_delete:
+        try:
+            p.unlink()
+            log.info("pruned old checkpoint %s", p)
+        except OSError as exc:  # noqa: BLE001 — best-effort cleanup
+            log.warning("failed to prune %s: %s", p, exc)
+
+
 def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
     """Restore agent state in place from a ``_save_checkpoint`` output.
 
@@ -957,6 +1001,19 @@ def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
 # ---------------------------------------------------------------------------
 
 
+class EnvResetFailed(Exception):  # noqa: N818 — keeps legacy callers' match strings readable
+    """Raised by ``run_one_episode`` when ``env.reset`` fails in a way that
+    should be handled per-track (missing savestate / unknown slug) rather
+    than as a generic env crash. The outer ``train()`` loop catches this
+    alongside socket errors and triggers the per-track crash counter.
+
+    Narrower than swallowing raw ``FileNotFoundError`` / ``KeyError``: a
+    future code change that introduces a bare dict lookup inside
+    ``learn_step`` won't be miscategorized as "env crash" and silently
+    absorbed by the retry loop.
+    """
+
+
 def _make_env(cfg: TrainConfig) -> MkwDolphinEnv:
     """Construct an ``MkwDolphinEnv`` from a ``TrainConfig``.
 
@@ -964,12 +1021,14 @@ def _make_env(cfg: TrainConfig) -> MkwDolphinEnv:
     ``mkw_rl_src``) and falls through to ``MkwDolphinEnv`` defaults for the
     ones left unset. Centralized so the initial launch and the crash-restart
     path stay in sync — a silent divergence here produces the exact
-    "restart-clobbers-custom-paths" bug.
+    "restart-clobbers-custom-paths" bug. Also plumbs ``log_dir`` so the env
+    writes Dolphin's stdout/stderr next to our CSV/ckpt outputs.
     """
     kwargs: dict[str, Any] = {
         "env_id": cfg.env_id,
         "savestate_dir": cfg.savestate_dir,
         "track_metadata_path": cfg.track_metadata_path,
+        "log_dir": cfg.log_dir,
     }
     if cfg.dolphin_app is not None:
         kwargs["dolphin_app"] = cfg.dolphin_app
@@ -1111,14 +1170,12 @@ def train(
                 BrokenPipeError,
                 ConnectionResetError,
                 OSError,
-                # MkwDolphinEnv.reset raises FileNotFoundError if a track's
-                # savestate goes missing (concurrent file deletion, or the
-                # sampler is ahead of the filesystem), and KeyError if
-                # track_metadata.yaml is missing an entry. Treat both as
-                # per-track failures — remove the slug after MAX_TRACK_CRASHES
-                # rather than killing the whole run.
-                FileNotFoundError,
-                KeyError,
+                TimeoutError,
+                # run_one_episode wraps env.reset's per-track FileNotFoundError
+                # / KeyError into this narrow exception class so a future dict
+                # lookup in learn_step can't be miscategorized as "env crash"
+                # and silently absorbed by the retry loop.
+                EnvResetFailed,
             ) as exc:
                 env_crash_streak += 1
                 track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
@@ -1191,6 +1248,9 @@ def train(
             ):
                 ckpt_path = Path(cfg.log_dir) / f"{run_name}_grad{agent.grad_steps}.pt"
                 _save_checkpoint(agent, cfg, ckpt_path)
+                _prune_old_checkpoints(
+                    Path(cfg.log_dir), run_name, cfg.keep_last_n_checkpoints,
+                )
     except KeyboardInterrupt:
         log.warning("KeyboardInterrupt — saving final checkpoint before exit")
         shutdown_flag["shutdown"] = True

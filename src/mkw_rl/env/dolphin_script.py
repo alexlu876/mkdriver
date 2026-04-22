@@ -88,12 +88,19 @@ FRAME_STACK = 4
 FRAMESKIP = 4
 FRAMES_POOLED = 2  # pool last 2 frames of each frameskip window (Atari convention)
 
-STICK_X_VALUES = [-1.0, -0.5, 0.0, 0.5, 1.0]
+STICK_X_VALUES = [-1.0, -0.4, 0.0, 0.4, 1.0]  # matches VIPTankz DolphinScript.py:346
 R_VALUES = [False, True]
 UP_VALUES = [False, True]
 L_VALUES = [False, True]
 NUM_ACTIONS = len(STICK_X_VALUES) * len(R_VALUES) * len(UP_VALUES) * len(L_VALUES)
 assert NUM_ACTIONS == 40
+
+# Neutral action: stick_idx=2 (center, 0.0), drift off, item off, up off, L off.
+# Used as the default ``last_action`` during boot + savestate load + between
+# master commands so the game controller isn't being spammed with hard-left
+# steering (action 0) during non-learning frames.
+# Encoding: action = stick_idx * 8 + r_idx * 4 + up_idx * 2 + l_idx.
+NEUTRAL_ACTION = 2 * 8  # = 16
 
 
 # --- RAM pointer chains (PAL RMCP01, from VIPTankz's DolphinScript.py) ---
@@ -115,6 +122,9 @@ class _Addresses:
         self.offroad_invincibility = _resolve(0x809C18F8, [0x20, 0x0, 0x0, 0x28, 0x148])  # :119
         self.race_position = _resolve(0x809C18F8, [0x20, 0x0, 0x0, 0x18, 0x3C])  # :141
         self.wall_collide = _resolve(0x809C18F8, [0x20, 0x0, 0x0, 0x8, 0x90, 0x8, 0x8])  # :145
+        # Kart speed — f32 in Wii-internal units. Used by reward.py's speed
+        # bonus at checkpoint crossings. VIPTankz DolphinScript.py:114 chain.
+        self.kart_speed = _resolve(0x809C18F8, [0x20, 0x0, 0x0, 0x28, 0x20])  # :114
 
 
 def _read_race_state(addrs: _Addresses) -> RaceState:
@@ -133,6 +143,10 @@ def _read_race_state(addrs: _Addresses) -> RaceState:
         touching_offroad=touching_offroad,
         wall_collide=memory.read_u32(addrs.wall_collide),
         offroad_invincibility=memory.read_u16(addrs.offroad_invincibility),
+        # Kart speed, f32. See `reward.py:RewardConfig.speed_bonus_reference`
+        # for the normalization factor applied when computing the checkpoint
+        # speed bonus.
+        kart_speed=memory.read_f32(addrs.kart_speed),
     )
 
 
@@ -184,7 +198,11 @@ for _ in range(8):
 # Stateful across reset/step cycles.
 addrs: _Addresses | None = None
 tracker: TrackRewardTracker | None = None
-last_action: int = 0
+# Start at NEUTRAL_ACTION so the on_frameadvance callback doesn't drive the
+# controller hard-left during Dolphin boot, savestate-load, and the pre-step
+# settle frames. Switches to the master's command on each step; resets to
+# NEUTRAL_ACTION on every reset so the post-load frames aren't mashed.
+last_action: int = NEUTRAL_ACTION
 frame_stack: np.ndarray = np.zeros((FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
 
 # Re-apply the current action every rendered frame so the game state stays
@@ -238,7 +256,9 @@ while True:
             tracker = None
             continue
 
-        last_action = 0
+        # Back to neutral between episodes so no stale command is driven
+        # into the kart during the settle frames before the first step.
+        last_action = NEUTRAL_ACTION
         conn.send(("reset_ok", frame_stack.tobytes()))
         continue
 

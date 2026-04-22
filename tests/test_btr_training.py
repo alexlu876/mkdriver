@@ -906,6 +906,157 @@ class TestCrashRestart:
         # from remove_track at log warning time is the proof. For a stronger
         # assertion see the sampler-level test below.
 
+    def test_train_recovers_from_env_reset_failed(self, tmp_path: Path) -> None:
+        """Round-5: env.reset raising FileNotFoundError (missing savestate) or
+        KeyError (unknown track slug) gets converted to EnvResetFailed by
+        run_one_episode. The outer train() loop catches that alongside the
+        socket errors and runs the per-track crash counter."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(tmp_path, total_frames=15, min_sampling_size=10_000)
+        envs: list[_FakeEnv] = []
+
+        def fake_make(c: TrainConfig) -> _FakeEnv:  # noqa: ARG001
+            # First env's first reset raises FileNotFoundError. Subsequent
+            # envs run cleanly.
+            crash_error = FileNotFoundError if len(envs) == 0 else BrokenPipeError
+            crash_on = 1 if len(envs) == 0 else None
+            env = _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[1.0] * 3,
+                crash_on_reset_n=crash_on,
+                crash_error=crash_error,
+            )
+            envs.append(env)
+            return env
+
+        with patch.object(train_mod, "_make_env", side_effect=fake_make):
+            train(cfg)
+
+        assert len(envs) >= 2, "expected env restart after FileNotFoundError"
+
+    def test_env_reset_failed_is_narrow(self, tmp_path: Path) -> None:
+        """A raw FileNotFoundError from env.reset gets wrapped as EnvResetFailed.
+        A non-reset error path (e.g. from agent.learn_step) does NOT get
+        absorbed by the widened catch — it propagates up as expected."""
+        from mkw_rl.rl.train import BTRAgent, EnvResetFailed, run_one_episode
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+
+        class _FileNotFoundEnv:
+            def reset(self, **_kwargs: object):  # noqa: ANN204
+                raise FileNotFoundError("missing_savestate.sav")
+
+            def step(self, action: int):  # noqa: ARG002, ANN204
+                raise RuntimeError("unreachable")
+
+            def close(self) -> None:
+                pass
+
+        with pytest.raises(EnvResetFailed):
+            run_one_episode(agent, _FileNotFoundEnv(), "luigi_circuit_tt")
+
+    def test_keyerror_from_learn_step_not_absorbed(self, tmp_path: Path) -> None:
+        """A KeyError raised from somewhere other than env.reset must NOT be
+        absorbed by the outer train() crash-catch — that would silently mask
+        training-code bugs as "env crash"."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(tmp_path, total_frames=10, min_sampling_size=10_000)
+
+        def fake_make(c: TrainConfig) -> _FakeEnv:  # noqa: ARG001
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[1.0] * 3,
+            )
+
+        # Patch BTRAgent.learn_step to raise KeyError. This simulates a dict
+        # lookup bug deep in the training code. With the narrowed catch, this
+        # should propagate out of train() instead of being caught as env crash.
+        def raise_keyerror(self):  # noqa: ANN001, ARG001
+            raise KeyError("bogus_dict_lookup")
+
+        with (
+            patch.object(train_mod, "_make_env", side_effect=fake_make),
+            patch.object(train_mod.BTRAgent, "learn_step", new=raise_keyerror),
+            pytest.raises(KeyError, match="bogus_dict_lookup"),
+        ):
+            train(cfg)
+
+
+class TestCheckpointRotation:
+    def test_prune_keeps_last_n(self, tmp_path: Path) -> None:
+        # Create 7 fake grad ckpts with increasing mtimes.
+        import os as _os
+
+        from mkw_rl.rl.train import _prune_old_checkpoints
+        run = "btr_test"
+        for i in range(1, 8):
+            p = tmp_path / f"{run}_grad{i}.pt"
+            p.write_bytes(b"x")
+            _os.utime(p, (1000 + i, 1000 + i))
+        # Final + diverged should NEVER be pruned.
+        (tmp_path / f"{run}_final.pt").write_bytes(b"x")
+        (tmp_path / f"{run}_diverged.pt").write_bytes(b"x")
+
+        _prune_old_checkpoints(tmp_path, run_name=run, keep_last_n=3)
+
+        remaining = {p.name for p in tmp_path.glob(f"{run}*")}
+        # Keep 3 newest: grad5, grad6, grad7. Plus final and diverged.
+        assert remaining == {
+            f"{run}_grad5.pt",
+            f"{run}_grad6.pt",
+            f"{run}_grad7.pt",
+            f"{run}_final.pt",
+            f"{run}_diverged.pt",
+        }
+
+    def test_prune_disabled_when_keep_zero(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import _prune_old_checkpoints
+
+        run = "btr_test"
+        for i in range(1, 5):
+            (tmp_path / f"{run}_grad{i}.pt").write_bytes(b"x")
+
+        _prune_old_checkpoints(tmp_path, run_name=run, keep_last_n=0)
+
+        assert len(list(tmp_path.glob(f"{run}_grad*.pt"))) == 4
+
+    def test_prune_doesnt_touch_other_runs(self, tmp_path: Path) -> None:
+        """Pruning one run_name must not delete another run's ckpts."""
+        from mkw_rl.rl.train import _prune_old_checkpoints
+
+        for i in range(1, 5):
+            (tmp_path / f"run_a_grad{i}.pt").write_bytes(b"x")
+            (tmp_path / f"run_b_grad{i}.pt").write_bytes(b"x")
+
+        _prune_old_checkpoints(tmp_path, run_name="run_a", keep_last_n=1)
+
+        a_remaining = list(tmp_path.glob("run_a_grad*.pt"))
+        b_remaining = list(tmp_path.glob("run_b_grad*.pt"))
+        assert len(a_remaining) == 1
+        assert len(b_remaining) == 4  # untouched
+
+
+class TestLearnStepMetricsHaveNonfiniteStreak:
+    def test_happy_path_includes_nonfinite_streak(self, tmp_path: Path) -> None:
+        """Round-5: nonfinite_streak=0 emitted on happy path so the CSV/wandb
+        column exists from step 1 (not just after the first divergence)."""
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        seq_len = cfg.burn_in_len + cfg.learning_seq_len
+        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        m = agent.learn_step()
+        assert "nonfinite_streak" in m
+        assert m["nonfinite_streak"] == 0
+
+
+class TestSamplerRemoveTrack:
     def test_sampler_remove_track(self, tmp_path: Path) -> None:
         """Direct test of sampler.remove_track — distribution renormalizes."""
         from mkw_rl.rl.track_sampler import (
