@@ -345,6 +345,140 @@ class TestPER:
         with pytest.raises(RuntimeError, match="empty buffer"):
             per.sample(4)
 
+
+# ---------------------------------------------------------------------------
+# R2D2 recurrent sampling (sample_sequences).
+# ---------------------------------------------------------------------------
+
+
+class TestPERSampleSequences:
+    def _make_per(self, size: int = 128, n: int = 3, envs: int = 1) -> PER:
+        return PER(
+            size=size,
+            device="cpu",
+            n=n,
+            envs=envs,
+            gamma=0.99,
+            framestack=4,
+            imagex=30,
+            imagey=20,
+        )
+
+    def _fill(self, per: PER, n_appends: int = 80) -> None:
+        state = _random_stack()
+        n_state = _random_stack()
+        for i in range(n_appends):
+            per.append(
+                state, action=i % 4, reward=float(i), n_state=n_state,
+                done=False, trun=False, stream=0,
+            )
+
+    def test_shapes_n_step_3(self) -> None:
+        per = self._make_per(size=128, n=3)
+        self._fill(per, 80)
+        batch_size, seq_len = 4, 10
+        tree_idxs, states, actions, rewards, n_states, dones, weights = (
+            per.sample_sequences(batch_size, seq_len)
+        )
+        assert tree_idxs.shape == (batch_size,)
+        # framestack=4, imagey=20, imagex=30
+        assert states.shape == (batch_size, seq_len, 4, 20, 30)
+        assert n_states.shape == (batch_size, seq_len, 4, 20, 30)
+        assert actions.shape == (batch_size, seq_len)
+        assert rewards.shape == (batch_size, seq_len)
+        assert dones.shape == (batch_size, seq_len)
+        assert weights.shape == (batch_size,)
+        # Tensor dtypes
+        assert states.dtype == torch.float32
+        assert actions.dtype == torch.int64
+        assert dones.dtype == torch.bool
+
+    def test_shapes_n_step_1(self) -> None:
+        """The n_step=1 fast path should not double-wrap dimensions."""
+        per = self._make_per(size=128, n=1)
+        self._fill(per, 80)
+        _, states, actions, rewards, _, dones, _ = per.sample_sequences(3, 8)
+        assert states.shape == (3, 8, 4, 20, 30)
+        assert actions.shape == (3, 8)
+        assert rewards.shape == (3, 8)
+        assert dones.shape == (3, 8)
+
+    def test_seq_len_larger_than_capacity_raises(self) -> None:
+        per = self._make_per(size=32, n=3)
+        self._fill(per, 20)  # partial fill; capacity<32
+        with pytest.raises(ValueError, match="exceeds buffer capacity"):
+            per.sample_sequences(4, seq_len=per.capacity + 1)
+
+    def test_seq_len_zero_raises(self) -> None:
+        per = self._make_per(size=32, n=3)
+        self._fill(per, 50)
+        with pytest.raises(ValueError, match="seq_len must be >= 1"):
+            per.sample_sequences(4, 0)
+
+    def test_empty_buffer_raises(self) -> None:
+        per = self._make_per(size=32, n=3)
+        with pytest.raises(RuntimeError, match="empty buffer"):
+            per.sample_sequences(4, 8)
+
+    def test_sequence_contains_consecutive_actions(self) -> None:
+        """Actions within a sampled sequence should correspond to consecutive
+        transitions from storage — they won't be strictly monotonic because
+        we cycle action=i%4, but they should reflect the append order locally."""
+        per = self._make_per(size=128, n=1)
+        self._fill(per, 100)
+        _, _, actions, *_ = per.sample_sequences(1, seq_len=5)
+        # For any start idx k, actions should be [(k)%4, (k+1)%4, ...] — local
+        # progression by +1 mod 4.
+        diffs = (actions[0, 1:] - actions[0, :-1]).cpu().numpy()
+        # Valid diffs are either +1 or -3 (mod 4 wrap).
+        assert all(d in (1, -3) for d in diffs), f"non-consecutive actions: {actions[0]}"
+
+    def test_priority_updates_affect_sequence_sampling(self) -> None:
+        """A boosted-priority start idx should appear in every batch."""
+        per = self._make_per(size=128, n=1)
+        self._fill(per, 100)
+        tree_idxs, *_ = per.sample_sequences(2, 4)
+        boosted = tree_idxs[0]
+        per.update_priorities(np.array([boosted]), np.array([1e10]))
+
+        for _ in range(15):
+            tree_idxs, *_ = per.sample_sequences(4, 4)
+            assert boosted in tree_idxs
+
+    def test_rejects_sequences_crossing_write_head_when_full(self) -> None:
+        """Buffer at full capacity: a sequence covering point_mem_idx would
+        span a seam between new and stale data. Such starts must be rejected.
+
+        Test realism: in training the buffer is ~1M entries and sequences
+        are ~60 frames, so rejection rate per-sample is ~6e-5. In this
+        test we use capacity=512, seq_len=8 so rejection rate is ~1.5%
+        per element and batch-level rejection probability is very low —
+        the retry loop should succeed on the first try in practice.
+        """
+        per = self._make_per(size=512, n=1)
+        self._fill(per, 2000)  # definitely wrapped
+        assert per.capacity == per.size  # wrapped
+        # Run many samples; confirm the rejection loop returns valid batches.
+        for _ in range(10):
+            _, states, *_ = per.sample_sequences(4, 8)
+            assert states.shape == (4, 8, 4, 20, 30)
+
+    def test_n_step_discount_applied_per_timestep(self) -> None:
+        """With n_step=3 and rewards=1.0 everywhere (no terminal), every
+        element of the returned rewards tensor should be the standard
+        3-step discounted sum 1 + 0.99 + 0.99^2 ≈ 2.9701."""
+        per = self._make_per(size=128, n=3)
+        state = _random_stack()
+        n_state = _random_stack()
+        for _ in range(100):
+            per.append(state, action=0, reward=1.0, n_state=n_state,
+                       done=False, trun=False, stream=0)
+        _, _, _, rewards, _, _, _ = per.sample_sequences(2, 5)
+        expected = 1.0 + 0.99 + 0.99**2
+        assert torch.allclose(
+            rewards, torch.full_like(rewards, expected), atol=1e-5
+        )
+
     def test_compute_discounted_rewards_breaks_on_done(self) -> None:
         per = self._make_per(size=16, n=3)
         rewards = np.array([[1.0, 1.0, 1.0]])

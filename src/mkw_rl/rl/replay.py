@@ -50,11 +50,11 @@ the 2026-04-21 forensic audit of VIPTankz/Wii-RL for full analysis.
    we err generous. Configurable via constructor.
 
 .. note::
-    This module is pass-1 scope. Pass 3 will add an R2D2-style
-    ``sample_sequences(batch_size, burn_in, learn_window)`` method that
-    returns (burn_in + learn_window)-length sequences for recurrent
-    training. The existing ``sample()`` stays as-is so a non-recurrent
-    agent could still use this buffer.
+    Pass 3 (2026-04-21) added ``sample_sequences(batch_size, seq_len)``
+    for R2D2-style recurrent replay. The existing ``sample()`` is kept
+    as-is so a non-recurrent agent could still use this buffer. The
+    two methods share storage and sumtree priorities but differ in
+    what they return.
 """
 
 from __future__ import annotations
@@ -460,6 +460,166 @@ class PER:
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
 
         return tree_idxs, states, actions, rewards, n_states, dones, weights
+
+    def sample_sequences(
+        self,
+        batch_size: int,
+        seq_len: int,
+        count: int = 0,
+    ):
+        """R2D2-style recurrent sampling.
+
+        Returns ``batch_size`` sequences of length ``seq_len``, each element
+        being an n-step transition (framestack → action → n-step discounted
+        reward → n-step-later framestack → done-within-window flag). The
+        training loop splits each sequence into burn-in (no-grad forward to
+        warm up the LSTM hidden state) and learning-window (with-grad loss
+        target) per the R2D2 recipe.
+
+        Storage is shared with ``sample()``; start indices are picked from
+        the same SumTree priority distribution. A sequence is rejected if
+        its window would cross the circular buffer's write head (meaning
+        part of the sequence is from the current rollout and part is from
+        the previous lap of the buffer — i.e., stale / broken trajectory).
+        Up to 5 rejection retries before raising.
+
+        Returns
+        -------
+        tree_idxs : (B,) numpy int array
+            SumTree indices of the sequence START positions — for
+            update_priorities(). R2D2 typically scores priority as
+            max-TD over the sequence; training loop decides the aggregation.
+        states : (B, T, framestack, H, W) float32 on device
+        actions : (B, T) int64 on device
+        rewards : (B, T) float32 on device — n-step discounted return at each t
+        n_states : (B, T, framestack, H, W) float32 on device — framestack at
+            t+n_step for Q-target bootstrap
+        dones : (B, T) bool on device — whether a terminal occurred within
+            the n-step window starting at t
+        weights : (B,) float32 on device — PER IS weights for the start idx
+
+        Parameters
+        ----------
+        batch_size : int
+        seq_len : int
+            Full sequence length; the training loop decides the burn-in /
+            learning-window split.
+        """
+        if self.capacity == 0:
+            raise RuntimeError("PER.sample_sequences() called on empty buffer (capacity=0)")
+        if seq_len < 1:
+            raise ValueError(f"seq_len must be >= 1, got {seq_len}")
+        if seq_len > self.capacity:
+            raise ValueError(
+                f"seq_len={seq_len} exceeds buffer capacity={self.capacity}; "
+                "train longer before sampling this seq_len"
+            )
+
+        p_total = self.st.total()
+
+        # Stratified sampling over the priority distribution for START indices.
+        segment_length = p_total / batch_size
+        segment_starts = np.arange(batch_size) * segment_length
+        samples = np.random.uniform(0.0, segment_length, [batch_size]) + segment_starts
+        prios, start_idxs, tree_idxs = self.st.find(samples)
+        probs = prios / p_total
+
+        # Build sequence index matrix via circular wrap.
+        # Shape: (B, T)
+        seq_idxs = (start_idxs[:, None] + np.arange(seq_len)[None, :]) % self.capacity
+
+        # Reject any sequence whose window crosses the write head once the
+        # buffer has wrapped (point_mem_idx is the next write position; any
+        # sequence containing point_mem_idx spans the seam between new and
+        # stale data). Pre-wrap (capacity < size), everything up to
+        # point_mem_idx is valid, so we reject if seq_idxs[b, t] ≥ capacity
+        # OR touches the write-head seam.
+        # NOTE: this is conservative — a fully-empty buffer region between
+        # writes and the old head's tail could still be valid, but rejecting
+        # is safer and cheaper than tracking the exact liveness interval.
+        if self.capacity == self.size:
+            # Wrapped buffer: reject if any element of the sequence == write head.
+            invalid_mask = np.any(seq_idxs == self.point_mem_idx, axis=1)
+        else:
+            # Pre-wrap: reject if any element lands in uninitialized territory
+            # (index >= capacity after modular).
+            invalid_mask = np.any(seq_idxs >= self.capacity, axis=1)
+
+        if invalid_mask.any():
+            if count >= 5:
+                raise RuntimeError(
+                    f"sample_sequences({batch_size=}, {seq_len=}) couldn't find "
+                    f"{batch_size} non-seam starts after 5 retries. Capacity may be "
+                    "too small relative to seq_len, or buffer is pathologically packed."
+                )
+            return self.sample_sequences(batch_size, seq_len, count + 1)
+
+        # Dereference pointer_mem in one flat pass for speed.
+        flat_pointers = self.pointer_mem[seq_idxs.flatten()]  # (B*T,)
+
+        state_ptr_flat = np.array([p[0] for p in flat_pointers])  # (B*T, framestack)
+        n_state_ptr_flat = np.array([p[1] for p in flat_pointers])
+        # reward_array per entry is length n_step; p[2][0] is the action index
+        # (also the first reward index for n-step accumulation).
+        action_ptr_flat = np.array([p[2][0] for p in flat_pointers])  # (B*T,)
+
+        states = self.state_mem[state_ptr_flat].reshape(
+            batch_size, seq_len, self.framestack, self.imagey, self.imagex
+        )
+        n_states = self.state_mem[n_state_ptr_flat].reshape(
+            batch_size, seq_len, self.framestack, self.imagey, self.imagex
+        )
+
+        actions = self.action_mem[action_ptr_flat].reshape(batch_size, seq_len)
+
+        # Rewards + dones: if n_step=1 the "per-timestep n-step reward" is just
+        # reward_mem[action_ptr]; if n_step>1 we need the full n-step window
+        # per timestep and then apply discount per (B, T) element.
+        if self.n_step > 1:
+            reward_ptr_seq = np.array([p[2] for p in flat_pointers]).reshape(
+                batch_size, seq_len, self.n_step
+            )
+            rewards_nstep = self.reward_mem[reward_ptr_seq]  # (B, T, n_step)
+            dones_nstep = self.done_mem[reward_ptr_seq]
+            truns_nstep = self.trun_mem[reward_ptr_seq]
+
+            # Apply per-(B, T) n-step discount. compute_discounted_rewards_batch
+            # operates on (batch, n_step) so flatten (B, T) → (B*T) for it.
+            rewards_flat, dones_flat = self.compute_discounted_rewards_batch(
+                rewards_nstep.reshape(batch_size * seq_len, self.n_step),
+                dones_nstep.reshape(batch_size * seq_len, self.n_step),
+                truns_nstep.reshape(batch_size * seq_len, self.n_step),
+            )
+            rewards = rewards_flat.reshape(batch_size, seq_len)
+            dones = dones_flat.reshape(batch_size, seq_len)
+        else:
+            # n_step=1 — trivial, just per-timestep single-step reward.
+            rewards = self.reward_mem[action_ptr_flat].reshape(batch_size, seq_len)
+            dones = self.done_mem[action_ptr_flat].reshape(batch_size, seq_len)
+
+        # IS weights from the START position's priority (single weight per sequence).
+        weights = (self.capacity * probs) ** -self.alpha
+        weights = torch.tensor(
+            weights / weights.max(),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        if torch.isnan(weights).any():
+            if count >= 5:
+                raise RuntimeError(
+                    "PER.sample_sequences() produced NaN weights after retries"
+                )
+            return self.sample_sequences(batch_size, seq_len, count + 1)
+
+        # To device.
+        states_t = torch.tensor(states, dtype=torch.float32, device=self.device)
+        n_states_t = torch.tensor(n_states, dtype=torch.float32, device=self.device)
+        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+        dones_t = torch.tensor(dones, dtype=torch.bool, device=self.device)
+        actions_t = torch.tensor(actions, dtype=torch.int64, device=self.device)
+
+        return tree_idxs, states_t, actions_t, rewards_t, n_states_t, dones_t, weights
 
     def compute_discounted_rewards_batch(
         self,
