@@ -13,12 +13,20 @@ Components:
 - ``model`` — BTRPolicy composing ``mkw_rl.bc.model.ImpalaEncoder`` + LSTM +
   IQN heads, chosen for direct BC↔BTR weight compatibility at the encoder
   and LSTM.
-- ``track_sampler`` (pass 4, upcoming) — progress-weighted track picker.
+- ``track_sampler`` — progress-weighted track picker. Maintains a
+  per-track EMA of episode return; the training loop calls
+  ``sampler.sample()`` before each ``env.reset()`` and
+  ``sampler.update(slug, episode_return)`` after each rollout.
 """
 
 from mkw_rl.rl.model import BTRConfig, BTRPolicy
 from mkw_rl.rl.networks import Dueling, FactorizedNoisyLinear
 from mkw_rl.rl.replay import PER, SumTree
+from mkw_rl.rl.track_sampler import (
+    ProgressWeightedTrackSampler,
+    TrackSamplerConfig,
+    construct_from_available,
+)
 
 __all__ = [
     "PER",
@@ -26,5 +34,8 @@ __all__ = [
     "BTRPolicy",
     "Dueling",
     "FactorizedNoisyLinear",
+    "ProgressWeightedTrackSampler",
     "SumTree",
+    "TrackSamplerConfig",
+    "construct_from_available",
 ]
