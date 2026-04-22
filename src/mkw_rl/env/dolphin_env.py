@@ -282,21 +282,19 @@ class MkwDolphinEnv(gym.Env):
         # via `--opt=value`. Space-separated `--opt value` silently drops
         # the value for some opts (observed live: `--script /path` resulted
         # in scripting never firing; `--script=/path` works).
-        # Force the Software video backend under xvfb. The default on Linux
-        # builds is Vulkan or OpenGL, which under xvfb's stub X server tries
-        # to initialize a real GPU context — observed to spin at high CPU
-        # across 100+ threads without actually starting emulation, delaying
-        # scripting init by minutes (sometimes indefinitely). `-v Software`
-        # uses CPU-only rendering; throughput is fine because we never
-        # display the frame — only read it via event.framedrawn().
+        # Arg order MATTERS here. Empirically (Vast.ai 5080, Felk dolphin fork):
+        # `--batch` must come BEFORE `--no-python-subinterpreters` AND before
+        # any `-C` options, else Dolphin hangs at 600%+ CPU without ever
+        # reaching scripting init (slave's print never fires, master's accept
+        # times out). probe7.sh with this exact order reliably starts scripting
+        # in ~1.5s. Other orderings produce a spin even with the same flags.
         cmd = [
             *xvfb_prefix,
             str(inner_binary),
-            "--no-python-subinterpreters",
             "--batch",
-            "-v", "Software",
             "-C", "Logger.Options.WriteToConsole=True",
             "-C", "Logger.Logs.SCRIPTING=True",
+            "--no-python-subinterpreters",
             f"--script={_SLAVE_SCRIPT}",
             f"--exec={self.iso}",
         ]
