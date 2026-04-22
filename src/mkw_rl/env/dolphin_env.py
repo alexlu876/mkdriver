@@ -57,7 +57,7 @@ BASE_PORT = 26330
 # Dolphin boot + savestate load can take >60s on a cold box; step is tight
 # because a healthy 20ms frame × FRAMESKIP=4 = ~80ms, so anything over ~30s
 # is definitely a hang not a slow frame.
-ACCEPT_TIMEOUT_S: float = 120.0
+ACCEPT_TIMEOUT_S: float = 300.0  # Vast.ai Dolphin boot observed taking 100-180s; 120s was too tight
 RESET_TIMEOUT_S: float = 120.0
 STEP_TIMEOUT_S: float = 30.0
 
