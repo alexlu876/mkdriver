@@ -282,22 +282,13 @@ class MkwDolphinEnv(gym.Env):
         # via `--opt=value`. Space-separated `--opt value` silently drops
         # the value for some opts (observed live: `--script /path` resulted
         # in scripting never firing; `--script=/path` works).
-        # Wrap in `stdbuf -oL -eL` on Linux to force line-buffered stdio on
-        # the child. Dolphin detects when stdout isn't a tty and switches
-        # std::cout to block-buffered (4-8 KB). Under our Python-subprocess
-        # file-handle redirect, low-volume output like scripting-init lines
-        # sits in the buffer forever. `stdbuf` uses LD_PRELOAD to override
-        # the default buffering on stdio streams (glibc-only; Linux-only).
-        stdbuf_prefix: list[str] = []
-        if platform.system() == "Linux":
-            import shutil  # noqa: PLC0415
-            stdbuf = shutil.which("stdbuf")
-            if stdbuf:
-                stdbuf_prefix = [stdbuf, "-oL", "-eL"]
-
+        # NB: tried wrapping in `stdbuf -oL -eL` to force line-buffered stdio;
+        # it uses LD_PRELOAD which collides with Dolphin's embedded Python
+        # init and causes the child to spin at >1000% CPU without ever
+        # reaching scripting init. Leave stdio block-buffered — the CSV /
+        # socket traffic is what we care about, not the console log.
         cmd = [
             *xvfb_prefix,
-            *stdbuf_prefix,
             str(inner_binary),
             "--batch",
             "-C", "Logger.Options.WriteToConsole=True",
