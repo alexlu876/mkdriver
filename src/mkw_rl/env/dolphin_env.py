@@ -282,14 +282,22 @@ class MkwDolphinEnv(gym.Env):
         # via `--opt=value`. Space-separated `--opt value` silently drops
         # the value for some opts (observed live: `--script /path` resulted
         # in scripting never firing; `--script=/path` works).
-        # Arg order MATTERS here. Empirically (Vast.ai 5080, Felk dolphin fork):
-        # `--batch` must come BEFORE `--no-python-subinterpreters` AND before
-        # any `-C` options, else Dolphin hangs at 600%+ CPU without ever
-        # reaching scripting init (slave's print never fires, master's accept
-        # times out). probe7.sh with this exact order reliably starts scripting
-        # in ~1.5s. Other orderings produce a spin even with the same flags.
+        # Wrap in `stdbuf -oL -eL` on Linux to force line-buffered stdio on
+        # the child. Dolphin detects when stdout isn't a tty and switches
+        # std::cout to block-buffered (4-8 KB). Under our Python-subprocess
+        # file-handle redirect, low-volume output like scripting-init lines
+        # sits in the buffer forever. `stdbuf` uses LD_PRELOAD to override
+        # the default buffering on stdio streams (glibc-only; Linux-only).
+        stdbuf_prefix: list[str] = []
+        if platform.system() == "Linux":
+            import shutil  # noqa: PLC0415
+            stdbuf = shutil.which("stdbuf")
+            if stdbuf:
+                stdbuf_prefix = [stdbuf, "-oL", "-eL"]
+
         cmd = [
             *xvfb_prefix,
+            *stdbuf_prefix,
             str(inner_binary),
             "--batch",
             "-C", "Logger.Options.WriteToConsole=True",
@@ -306,8 +314,13 @@ class MkwDolphinEnv(gym.Env):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._dolphin_log_fh = open(log_path, "wb")  # noqa: SIM115 — held for lifetime of subprocess
         log.info("[env %d] launching: %s (log → %s)", self.env_id, " ".join(cmd), log_path)
+        # stdin=DEVNULL: the child should never try to read from stdin (it's
+        # a background emulator). Without this, if the parent's stdin is a
+        # tty or pipe that's busy with other data, some children hang on
+        # initial read attempts.
         self._process = subprocess.Popen(
             cmd, env=env,
+            stdin=subprocess.DEVNULL,
             stdout=self._dolphin_log_fh,
             stderr=subprocess.STDOUT,
         )
