@@ -320,6 +320,24 @@ class TestPER:
         # And total priority should be finite.
         assert np.isfinite(per.st.total())
 
+    def test_update_priorities_replaces_infinities(self) -> None:
+        """Regression: +inf and -inf must also be sanitized, not just NaN.
+        -inf ** alpha = NaN (for non-integer alpha), re-introducing the
+        corruption. +inf as a priority dominates stratified sampling."""
+        per = self._make_per(size=16, n=1)
+        state = _random_stack()
+        n_state = _random_stack()
+        for _ in range(10):
+            per.append(state, action=0, reward=1.0, n_state=n_state, done=False, trun=False, stream=0)
+        tree_idxs, *_ = per.sample(3)
+
+        per.update_priorities(
+            np.array([tree_idxs[0], tree_idxs[1]]),
+            np.array([float("inf"), float("-inf")]),
+        )
+        per.sample(2)
+        assert np.isfinite(per.st.total())
+
     def test_sample_on_empty_buffer_raises(self) -> None:
         """Regression: empty-buffer sample triggered NaN retry loop in raw code.
         Now raises a clear RuntimeError."""

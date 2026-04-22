@@ -496,19 +496,26 @@ class PER:
         priorities = priorities + self.eps
         # self._set_priority_min(idx - self.size + 1, sqrt(priority)) — see note above
 
-        if np.isnan(priorities).any():
-            # Surface as a loud log + replace NaNs with eps. VIPTankz's code
-            # logged the warning but fell through to st.update with NaN values,
+        if np.isnan(priorities).any() or np.isinf(priorities).any():
+            # Surface as a loud log + replace NaN/±inf with eps. VIPTankz's code
+            # logged a warning but fell through to st.update with the bad values,
             # corrupting the SumTree — subsequent sample() calls would raise
-            # OverflowError on np.random.uniform(0, NaN). We sanitize instead.
+            # OverflowError on np.random.uniform(0, NaN) or blow up stratified
+            # sampling with an astronomical +inf priority. Also handling ±inf
+            # because `-inf ** 0.2` re-introduces NaN post-exponentiation,
+            # defeating the NaN guard; positive inf becomes a priority so large
+            # it dominates all sampling until it decays.
             import logging  # noqa: PLC0415 — local import, rarely hit
 
+            n_bad = int(np.isnan(priorities).sum() + np.isinf(priorities).sum())
             logging.getLogger(__name__).warning(
-                "NaN found in priorities; this usually means the loss diverged. "
-                "Replacing %d NaN entries with eps to avoid SumTree corruption.",
-                int(np.isnan(priorities).sum()),
+                "Non-finite priorities (%d entries); this usually means the loss "
+                "diverged. Replacing with eps to avoid SumTree corruption.",
+                n_bad,
             )
-            priorities = np.nan_to_num(priorities, nan=self.eps)
+            priorities = np.nan_to_num(
+                priorities, nan=self.eps, posinf=self.eps, neginf=self.eps
+            )
 
         self.max_prio = max(self.max_prio, np.max(priorities))
         self.st.update(idxs, priorities**self.alpha)
