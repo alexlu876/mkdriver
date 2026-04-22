@@ -176,7 +176,17 @@ class MkwDolphinEnv(gym.Env):
                 inner = self.dolphin_app
         elif system == "Linux":
             if self.dolphin_app.is_dir():
-                for candidate in ("DolphinQt", "dolphin-emu", "dolphin-emu-nogui"):
+                # Headless-first: on Linux (Vast.ai / servers) we prefer
+                # ``dolphin-emu-nogui`` because it skips the Qt event loop +
+                # rendering subsystem — ~1.5-2× faster per frame, and avoids
+                # needing a display server. Fall back to the Qt variants if
+                # the user only has those installed. Felk's scripting fork
+                # ships scripting support (`--script`) in both binaries.
+                for candidate in (
+                    "dolphin-emu-nogui",
+                    "DolphinQt",
+                    "dolphin-emu",
+                ):
                     p = self.dolphin_app / candidate
                     if p.exists() and os.access(p, os.X_OK):
                         inner = p
@@ -184,7 +194,7 @@ class MkwDolphinEnv(gym.Env):
                 else:
                     raise FileNotFoundError(
                         f"no Dolphin binary in {self.dolphin_app}; expected one of "
-                        "DolphinQt / dolphin-emu / dolphin-emu-nogui (executable)"
+                        "dolphin-emu-nogui / DolphinQt / dolphin-emu (executable)"
                     )
             else:
                 inner = self.dolphin_app  # direct binary
