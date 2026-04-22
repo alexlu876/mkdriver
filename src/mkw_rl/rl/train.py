@@ -631,11 +631,18 @@ class BTRAgent:
             storage_size_multiplier=cfg.storage_size_multiplier,
         )
 
-        tracks = available_tracks(cfg.savestate_dir)
+        # Pass the metadata path so ``available_tracks`` intersects on-disk
+        # savestates with YAML entries — any slug on disk but missing from
+        # the YAML would crash ``env.reset`` with KeyError, burning 3 Dolphin
+        # boots per slug before the per-track crash counter kicks in. The
+        # intersection prevents that silent cost.
+        tracks = available_tracks(cfg.savestate_dir, cfg.track_metadata_path)
         if not tracks:
             raise RuntimeError(
-                f"no savestates found at {cfg.savestate_dir!r}; "
-                "record some via scripts/record_savestates.py first"
+                f"no usable savestates — disk={cfg.savestate_dir!r} "
+                f"intersected with track_metadata at {cfg.track_metadata_path!r} "
+                "is empty. Either record savestates via scripts/record_savestates.py, "
+                "or add matching entries to track_metadata.yaml."
             )
         sampler = ProgressWeightedTrackSampler(
             track_slugs=tracks,

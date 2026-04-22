@@ -79,6 +79,32 @@ uv run python scripts/preflight.py --dolphin /path/to/dolphin-emu
 
 The mechanical checks (Python version, binary existence, frame dump dir) will pass/warn automatically. The human-driven steps (Dolphin launches, PAL MKWii boots, scripting API works, savestate determinism) are in [docs/PREFLIGHT.md](docs/PREFLIGHT.md) and have to be done by hand.
 
+## Linux / Vast.ai setup (production training)
+
+The pipeline also runs on Linux CUDA hosts (Vast.ai). The env module auto-detects platform and switches between Darwin (`.app` bundle) and Linux (direct binary + `QT_QPA_PLATFORM=offscreen` for headless). Before launching:
+
+1. Build or install Dolphin-with-scripting on the target host. The binary must accept `--script` and `--no-python-subinterpreters` flags (the same fork VIPTankz ships). Common binary names we auto-detect: `DolphinQt`, `dolphin-emu`, `dolphin-emu-nogui`.
+2. Place your PAL MKWii ISO somewhere writable.
+3. Uncomment + set the env paths in `configs/btr.yaml`:
+
+   ```yaml
+   env:
+     env_id: 0
+     dolphin_app: "/opt/dolphin"            # directory containing the binary, OR direct binary path
+     iso: "/opt/mkw/mkw.iso"
+     mkw_rl_src: "/workspace/mkwii/src"     # absolute path to this repo's src/ dir
+   ```
+
+4. Copy the savestate bundle to `data/savestates/` on the host (the glob is intersected with `data/track_metadata.yaml` at build time, so only slugs present in both will be sampled).
+
+5. Launch:
+
+   ```bash
+   WANDB_API_KEY=… uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda
+   ```
+
+   Dolphin's stdout/stderr is captured to `{log_dir}/dolphin_env_0.log` for post-mortem diagnosis. Checkpoints land in `{log_dir}/{run_name}_grad{N}.pt` with rotation keeping the newest 5; `_final.pt` / `_diverged.pt` are never pruned. Resume with `--resume {path} [--run-name {name}]`.
+
 ## What's next
 
 - Complete [P-1](docs/PREFLIGHT.md) and record its output.

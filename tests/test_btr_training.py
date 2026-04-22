@@ -382,8 +382,52 @@ class TestBTRAgentBuild:
         cfg = TrainConfig(savestate_dir=str(savestate_dir))
         from mkw_rl.rl.train import BTRAgent
 
-        with pytest.raises(RuntimeError, match="no savestates found"):
+        with pytest.raises(RuntimeError, match="no usable savestates"):
             BTRAgent.build(cfg)
+
+    def test_build_uses_savestate_yaml_intersection(self, tmp_path: Path) -> None:
+        """Round-5 bug fix: available_tracks must intersect on-disk savestates
+        against track_metadata.yaml entries. A savestate on disk that's NOT in
+        the YAML should be EXCLUDED from the sampler (otherwise the curriculum
+        picks it and env.reset KeyErrors three times before sampler.remove_track)."""
+        import yaml as _yaml
+
+        from mkw_rl.rl.train import BTRAgent
+
+        savestate_dir = tmp_path / "savestates"
+        savestate_dir.mkdir()
+        # Two savestates on disk.
+        (savestate_dir / "luigi_circuit_tt.sav").write_bytes(b"")
+        (savestate_dir / "orphan_slug_tt.sav").write_bytes(b"")
+
+        # YAML has only one of them. Format is slug → fields (not list of dicts).
+        meta_path = tmp_path / "track_metadata.yaml"
+        meta_path.write_text(_yaml.safe_dump({
+            "luigi_circuit_tt": {
+                "name": "Luigi Circuit",
+                "cup": "mushroom",
+                "wr_seconds": 68.733,
+                "wr_category": "non_glitch",
+                "laps": 3,
+            }
+        }))
+
+        cfg = TrainConfig(
+            savestate_dir=str(savestate_dir),
+            track_metadata_path=str(meta_path),
+            # Keep the rest tiny so build is fast.
+            batch_size=2, replay_size=64, storage_size_multiplier=2.0,
+            lstm_hidden=16, feature_dim=16, linear_size=16,
+            num_tau=4, n_cos=8, encoder_channels=(4, 8, 8),
+            framestack=4, imagex=32, imagey=24, input_hw=(24, 32),
+            stack_size=4, min_sampling_size=16,
+            burn_in_len=2, learning_seq_len=4, n_step=2,
+            layer_norm=False, testing=True,
+        )
+        agent = BTRAgent.build(cfg)
+        # Only the YAML-backed slug is in the sampler; orphan is excluded.
+        assert agent.sampler.track_slugs == ["luigi_circuit_tt"]
+        assert "orphan_slug_tt" not in agent.sampler.progress
 
 
 # ---------------------------------------------------------------------------
