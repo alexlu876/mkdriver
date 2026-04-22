@@ -278,6 +278,11 @@ class MkwDolphinEnv(gym.Env):
         # from ever connecting to the master socket. Force console output so
         # the slave's "[slave 0] starting" log + any import/connection errors
         # land in our `dolphin_env_0.log` capture.
+        # All long-opt values passed with `=` syntax — Felk's Dolphin arg
+        # parser (optparse-era) only consistently binds values to long opts
+        # via `--opt=value`. Space-separated `--opt value` silently drops
+        # the value for some opts (observed live: `--script /path` resulted
+        # in scripting never firing; `--script=/path` works).
         cmd = [
             *xvfb_prefix,
             str(inner_binary),
@@ -285,8 +290,7 @@ class MkwDolphinEnv(gym.Env):
             "--batch",
             "-C", "Logger.Options.WriteToConsole=True",
             "-C", "Logger.Logs.SCRIPTING=True",
-            "--script",
-            str(_SLAVE_SCRIPT),
+            f"--script={_SLAVE_SCRIPT}",
             f"--exec={self.iso}",
         ]
 
