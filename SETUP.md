@@ -83,9 +83,10 @@ The mechanical checks (Python version, binary existence, frame dump dir) will pa
 
 The pipeline also runs on Linux CUDA hosts (Vast.ai). The env module auto-detects platform and switches between Darwin (`.app` bundle) and Linux (direct binary + `QT_QPA_PLATFORM=offscreen` for headless). Before launching:
 
-1. Build or install Dolphin-with-scripting on the target host. The binary must accept `--script` and `--no-python-subinterpreters` flags (the same fork VIPTankz ships). Common binary names we auto-detect: `DolphinQt`, `dolphin-emu`, `dolphin-emu-nogui`.
-2. Place your PAL MKWii ISO somewhere writable.
-3. Uncomment + set the env paths in `configs/btr.yaml`:
+1. Build or install Dolphin-with-scripting on the target host. The binary must accept `--script` and `--no-python-subinterpreters` flags (the same fork VIPTankz ships). Common binary names we auto-detect: on Linux `dolphin-emu-nogui` (headless, preferred), `DolphinQt`, `dolphin-emu`.
+2. Install `xvfb` (`apt install xvfb`). Required on Linux — `dolphin-emu-nogui` still initializes a Qt platform plugin + video backend that need an X display; we wrap the binary in `xvfb-run` automatically. Without xvfb, Dolphin fails with "No X11 display found / No platform found."
+3. Place your PAL MKWii ISO somewhere writable.
+4. Uncomment + set the env paths in `configs/btr.yaml`:
 
    ```yaml
    env:
@@ -95,15 +96,21 @@ The pipeline also runs on Linux CUDA hosts (Vast.ai). The env module auto-detect
      mkw_rl_src: "/workspace/mkwii/src"     # absolute path to this repo's src/ dir
    ```
 
-4. Copy the savestate bundle to `data/savestates/` on the host (the glob is intersected with `data/track_metadata.yaml` at build time, so only slugs present in both will be sampled).
+5. Copy the savestate bundle to `data/savestates/` on the host (the glob is intersected with `data/track_metadata.yaml` at build time, so only slugs present in both will be sampled).
 
-5. Install CUDA runtime libs with the Linux extra — torch 2.11+cu128 dlopens `libcusparseLt` / `libnvshmem_host` but doesn't pull them as a hard dep, so a plain `uv sync --extra dev` will `import torch`-fail on a fresh Linux CUDA host:
+6. Install CUDA runtime libs with the Linux extra — torch 2.11+cu128 dlopens `libcusparseLt` / `libnvshmem_host` but doesn't pull them as a hard dep, so a plain `uv sync --extra dev` will `import torch`-fail on a fresh Linux CUDA host:
 
    ```bash
    uv sync --extra dev --extra linux-cuda
    ```
 
-6. Launch:
+7. Prepend torch's bundled cuDNN to `LD_LIBRARY_PATH` (Vast.ai's PyTorch template ships cuDNN 9.8 system-wide; torch 2.11 was built against 9.19 and bundles the right version in its venv). Add to your shell's rc file:
+
+   ```bash
+   export LD_LIBRARY_PATH=$PWD/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+   ```
+
+8. Launch:
 
    ```bash
    WANDB_API_KEY=… uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda
