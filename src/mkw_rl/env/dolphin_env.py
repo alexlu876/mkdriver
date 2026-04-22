@@ -314,12 +314,17 @@ class MkwDolphinEnv(gym.Env):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._dolphin_log_fh = open(log_path, "wb")  # noqa: SIM115 — held for lifetime of subprocess
         log.info("[env %d] launching: %s (log → %s)", self.env_id, " ".join(cmd), log_path)
-        # stdin=DEVNULL: the child should never try to read from stdin (it's
-        # a background emulator). Without this, if the parent's stdin is a
-        # tty or pipe that's busy with other data, some children hang on
-        # initial read attempts.
+        # shell=True forces the launch through /bin/sh, which empirically
+        # matters for the Felk Dolphin fork: direct argv-list subprocess
+        # spawn produces Dolphin runs that hang at high CPU without ever
+        # reaching scripting init, while shell-spawn (the same path
+        # probe7.sh uses) reliably starts scripting within 1-2 seconds.
+        # Root cause not fully pinned down — likely Dolphin's reaction to
+        # controlling-tty inheritance or PID namespace differences.
+        import shlex  # noqa: PLC0415
+        shell_cmd = " ".join(shlex.quote(a) for a in cmd)
         self._process = subprocess.Popen(
-            cmd, env=env,
+            shell_cmd, env=env, shell=True,
             stdin=subprocess.DEVNULL,
             stdout=self._dolphin_log_fh,
             stderr=subprocess.STDOUT,
