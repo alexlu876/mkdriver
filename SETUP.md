@@ -97,7 +97,13 @@ The pipeline also runs on Linux CUDA hosts (Vast.ai). The env module auto-detect
 
 4. Copy the savestate bundle to `data/savestates/` on the host (the glob is intersected with `data/track_metadata.yaml` at build time, so only slugs present in both will be sampled).
 
-5. Launch:
+5. Install CUDA runtime libs with the Linux extra — torch 2.11+cu128 dlopens `libcusparseLt` / `libnvshmem_host` but doesn't pull them as a hard dep, so a plain `uv sync --extra dev` will `import torch`-fail on a fresh Linux CUDA host:
+
+   ```bash
+   uv sync --extra dev --extra linux-cuda
+   ```
+
+6. Launch:
 
    ```bash
    WANDB_API_KEY=… uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda

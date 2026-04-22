@@ -26,6 +26,15 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.4",
 ]
+# CUDA runtime libraries that torch 2.11+cu128 dlopens but doesn't pull as a
+# hard dep. Required for `import torch` to succeed on Linux/CUDA hosts.
+# Empirically confirmed on Vast.ai 5080 box (2026-04-22) — default uv sync
+# missed both and each produced `ImportError: libcusparseLt.so.0` /
+# `libnvshmem_host.so.3`. Install as Linux-only extras.
+linux-cuda = [
+    "nvidia-cusparselt-cu12>=0.5; sys_platform == 'linux'",
+    "nvidia-nvshmem-cu12>=3.6; sys_platform == 'linux'",
+]
 
 [build-system]
 requires = ["hatchling"]
