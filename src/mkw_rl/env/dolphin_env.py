@@ -269,11 +269,22 @@ class MkwDolphinEnv(gym.Env):
         # (the `--script` flag is only acted on after emulation begins).
         # Harmless on macOS's .app bundle path too — Dolphin auto-boots via
         # --exec either way.
+        #
+        # `-C Logger.Options.WriteToConsole=True` + `-C Logger.Logs.SCRIPTING=True`:
+        # On macOS Dolphin's Scripting logger writes to stdout by default. On
+        # Linux (both nogui and Qt variants) the logger is file-only by
+        # default, so `print()` from the slave script + any scripting engine
+        # diagnostics are invisible — including errors that prevent the slave
+        # from ever connecting to the master socket. Force console output so
+        # the slave's "[slave 0] starting" log + any import/connection errors
+        # land in our `dolphin_env_0.log` capture.
         cmd = [
             *xvfb_prefix,
             str(inner_binary),
             "--no-python-subinterpreters",
             "--batch",
+            "-C", "Logger.Options.WriteToConsole=True",
+            "-C", "Logger.Logs.SCRIPTING=True",
             "--script",
             str(_SLAVE_SCRIPT),
             f"--exec={self.iso}",
