@@ -263,10 +263,17 @@ class MkwDolphinEnv(gym.Env):
                 self.env_id,
             )
 
+        # `--batch` tells the Qt binary to skip the main window and auto-run
+        # --exec + --script on startup. Without it, Qt Dolphin on Linux sits
+        # at the game-library picker and the scripting engine never fires
+        # (the `--script` flag is only acted on after emulation begins).
+        # Harmless on macOS's .app bundle path too — Dolphin auto-boots via
+        # --exec either way.
         cmd = [
             *xvfb_prefix,
             str(inner_binary),
             "--no-python-subinterpreters",
+            "--batch",
             "--script",
             str(_SLAVE_SCRIPT),
             f"--exec={self.iso}",
