@@ -230,9 +230,6 @@ class MkwDolphinEnv(gym.Env):
 
         xvfb_prefix: list[str] = []
         if platform.system() == "Linux":
-            # Still set offscreen QPA as belt-and-braces; our real headless
-            # strategy is the xvfb-run wrapper below.
-            env.setdefault("QT_QPA_PLATFORM", "offscreen")
             xvfb_run = self._find_xvfb_run()
             if xvfb_run is None:
                 raise FileNotFoundError(
@@ -240,11 +237,13 @@ class MkwDolphinEnv(gym.Env):
                     "xvfb` — it's required for headless Dolphin on Linux since "
                     "the binary still requests an X display for Qt + video init."
                 )
-            # -a auto-selects a free display number; `-s` sets the virtual screen
-            # size (doesn't affect our observations — we read framebuffer via
-            # event.framedrawn, not the Qt window). Each env_id gets its own
-            # Xvfb instance, so multi-env launches don't collide on :99.
-            xvfb_prefix = [xvfb_run, "-a", "-s", "-screen 0 1024x768x24"]
+            # -a auto-selects a free display number. xvfb-run provides a real X
+            # display to the child, so we must NOT also set
+            # QT_QPA_PLATFORM=offscreen (observed: Dolphin's Qt binary hangs at
+            # Qt init if both xvfb display AND offscreen platform are active —
+            # it picks one, then the video backend tries the other, deadlock).
+            # Default screen size works fine; no need for explicit -s.
+            xvfb_prefix = [xvfb_run, "-a"]
 
         # Forward our training venv's site-packages so Dolphin's embedded
         # Python can import numpy, Pillow, etc. (pure-Python deps + C
