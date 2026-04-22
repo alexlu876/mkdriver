@@ -1,0 +1,93 @@
+# BTR training config — multi-track MKWii via recurrent IQN-Munchausen-PER.
+#
+# Defaults chosen per `docs/TRAINING_METHODOLOGY.md` and VIPTankz's BTR.py
+# published hyperparameters, with audit-derived adjustments noted inline.
+# See `scripts/train_btr.py --help` for CLI overrides.
+
+data:
+  savestate_dir: "data/savestates"           # dir with {slug}.sav files
+  track_metadata_path: "data/track_metadata.yaml"
+
+env:
+  env_id: 0                                  # socket port offset (26330 + env_id)
+  # dolphin_app + iso left unset → MkwDolphinEnv defaults (dev-machine paths)
+
+model:
+  # Architecture (passes 1+2). Must stay in sync with src/mkw_rl/rl/model.py BTRConfig.
+  stack_size: 4
+  input_hw: [75, 140]
+  encoder_channels: [16, 32, 32]
+  feature_dim: 256
+  lstm_hidden: 512
+  lstm_layers: 1
+  linear_size: 512
+  num_tau: 8
+  n_cos: 64
+  layer_norm: true                           # on for CUDA; --override layer_norm=false for MPS
+
+replay:
+  size: 1048576                              # 1M transitions (pointer table), VIPTankz default
+  storage_size_multiplier: 1.75              # post-audit bump from 1.25 for MKWii's long episodes
+  n_step: 3
+  gamma: 0.997                               # VIPTankz default
+  per_alpha: 0.2
+  per_beta: 0.4                              # written but not consumed (see replay.py module doc)
+  framestack: 4
+  imagex: 140
+  imagey: 75
+
+training:
+  batch_size: 256                            # VIPTankz default
+  lr: 0.0001
+  grad_clip: 10.0
+  replay_ratio: 1                            # 1 grad step per env step
+  target_replace_grad_steps: 200             # audit bump from VIPTankz's 500; MKWii is non-stationary
+  min_sampling_size: 200000                  # fill replay before first gradient (random policy)
+  total_frames: 500000000                    # 500M env steps for production; --testing shrinks this
+
+  # R2D2 sequence sampling (pass 3).
+  burn_in_len: 20
+  learning_seq_len: 40
+  # Priority aggregation η·max + (1-η)·mean per R2D2 paper §2.3 eq. 1.
+  priority_eta: 0.9
+
+  # Munchausen-DQN (VIPTankz).
+  entropy_tau: 0.03
+  munch_alpha: 0.9
+  munch_lo: -1.0
+
+sampler:
+  ema_alpha: 0.05                            # EMA half-life ~14 episodes
+  epsilon: 0.1                               # weight floor
+  cold_start_progress: 0.0
+
+logging:
+  wandb_project: "mkw-rl"                    # wandb uses this iff WANDB_API_KEY set, else CSV
+  log_dir: "runs/btr"                        # checkpoints + CSV fallback land here
+  log_every_grad_steps: 100
+  checkpoint_every_grad_steps: 10000
+
+runtime:
+  device: "cpu"                              # override 'mps' on M4 / 'cuda' on Vast.ai
+  seed: 0
+
+# Testing overrides — activated by `--testing` CLI flag. Tiny model + fast loop
+# to verify the training plumbing against a live Dolphin without burning budget.
+testing:
+  model:
+    feature_dim: 32
+    lstm_hidden: 64
+    linear_size: 64
+  replay:
+    size: 1024
+    storage_size_multiplier: 2.0             # smaller ratio bites faster at tiny size
+  training:
+    batch_size: 4
+    min_sampling_size: 64                    # warm up quickly
+    total_frames: 500                        # ~2 short episodes on Luigi Circuit
+    target_replace_grad_steps: 10
+    burn_in_len: 4
+    learning_seq_len: 8
+  logging:
+    log_every_grad_steps: 1
+    checkpoint_every_grad_steps: 50
