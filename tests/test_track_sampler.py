@@ -74,12 +74,18 @@ class TestColdStart:
             assert p == pytest.approx(0.25), f"{slug} got {p}, expected 0.25"
 
     def test_cold_start_sampling_roughly_uniform(self) -> None:
-        """With equal progress, many draws should approximate uniform distribution."""
+        """With equal progress, many draws should approximate uniform distribution.
+
+        Tolerance math: for N=4000 draws across 4 equiprobable categories,
+        per-category SD ≈ √(4000·0.25·0.75) ≈ 27.4. A ±130 band is ~4.75σ
+        per category, making union-bound flake rate ≈ 5e-6 (negligible).
+        Earlier ±100 band was only ~3.6σ (~0.1% flake rate — tighter than
+        advertised).
+        """
         s = ProgressWeightedTrackSampler(track_slugs=["a", "b", "c", "d"], seed=0)
         counts = collections.Counter(s.sample() for _ in range(4000))
         for slug in ["a", "b", "c", "d"]:
-            # Expect ~1000 ± 5% (large enough N that chi-square would accept).
-            assert 900 <= counts[slug] <= 1100, f"{slug}: {counts[slug]}"
+            assert 870 <= counts[slug] <= 1130, f"{slug}: {counts[slug]}"
 
 
 # ---------------------------------------------------------------------------

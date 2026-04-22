@@ -91,6 +91,20 @@ class ProgressWeightedTrackSampler:
             ... rollout ...
             sampler.update(slug, episode_return)
             # Optional wandb: log sampler.distribution() — maps slug → prob
+
+    Seed semantics
+    --------------
+    ``seed=None`` (default) uses numpy's entropy-based seed initializer —
+    two samplers constructed without a seed produce different sequences.
+    Pass an explicit integer for reproducible training runs.
+
+    Thread safety
+    -------------
+    **Single-writer only.** ``update()`` and ``add_track()`` mutate
+    ``self.progress``; ``sample()`` iterates over it. If these are called
+    from different threads without external locking, expect ``RuntimeError:
+    dictionary changed size during iteration``. For single-threaded
+    training loops (the intended use), this is not an issue.
     """
 
     track_slugs: list[str]
@@ -174,6 +188,11 @@ class ProgressWeightedTrackSampler:
         Use when the policy is replaced (e.g., loading a checkpoint that's
         ahead of the current sampler state) or when resuming training after
         a long break where old EMAs are no longer meaningful.
+
+        Does NOT reset the RNG — reproducibility under seed is a separate
+        concern from curriculum state, and most callers who reset also want
+        the RNG to keep advancing so subsequent ``sample()`` calls differ
+        from the ones that happened pre-reset.
         """
         for slug in self.progress:
             self.progress[slug] = self.config.cold_start_progress

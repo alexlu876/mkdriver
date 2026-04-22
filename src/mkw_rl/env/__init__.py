@@ -11,15 +11,18 @@ Components:
 - ``dolphin_env`` — gymnasium-compatible env launched in the training process (master)
 """
 
+from mkw_rl.env.dolphin_env import MkwDolphinEnv, available_tracks
 from mkw_rl.env.reward import RaceState, RewardBreakdown, RewardConfig, TrackRewardTracker
 from mkw_rl.env.track_meta import TrackMetadata, checkpoint_count_for_track, load_track_metadata
 
 __all__ = [
+    "MkwDolphinEnv",
     "RaceState",
     "RewardBreakdown",
     "RewardConfig",
     "TrackMetadata",
     "TrackRewardTracker",
+    "available_tracks",
     "checkpoint_count_for_track",
     "load_track_metadata",
 ]
