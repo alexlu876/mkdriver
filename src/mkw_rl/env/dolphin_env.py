@@ -227,6 +227,13 @@ class MkwDolphinEnv(gym.Env):
         env = dict(os.environ)
         env["MKW_RL_ENV_ID"] = str(self.env_id)
         env["MKW_RL_SRC"] = str(self._mkw_rl_src)
+        # Force Dolphin's embedded Python to use unbuffered stdout so the
+        # slave's `print(..., flush=True)` actually reaches our log file.
+        # Without this, Python's C-level stdio stays block-buffered when
+        # stdout is a regular file, and the slave's boot/handshake messages
+        # sit in the buffer until Dolphin exits (or the buffer fills, which
+        # it never does in practice). Diagnosis is impossible without them.
+        env["PYTHONUNBUFFERED"] = "1"
 
         xvfb_prefix: list[str] = []
         if platform.system() == "Linux":
