@@ -3,7 +3,7 @@ name = "mkw-rl"
 version = "0.1.0"
 description = "Behavioral cloning + RL agent for Mario Kart Wii via the Dolphin emulator"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "torch>=2.3",
     "torchvision>=0.18",
@@ -27,11 +27,24 @@ dev = [
     "ruff>=0.4",
 ]
 # CUDA runtime libraries that torch 2.11+cu128 dlopens but doesn't pull as a
-# hard dep. Required for `import torch` to succeed on Linux/CUDA hosts.
-# Empirically confirmed on Vast.ai 5080 box (2026-04-22) — default uv sync
-# missed both and each produced `ImportError: libcusparseLt.so.0` /
-# `libnvshmem_host.so.3`. Install as Linux-only extras.
+# hard dep. Required for `import torch` + `import torch.backends.cudnn` to
+# succeed on Linux/CUDA hosts. Empirically confirmed on Vast.ai 5080 box
+# (2026-04-22) — default uv sync misses these and each produces either
+# `ImportError: lib*.so.N` at import or `cuDNN version incompatibility` at
+# first LSTM/conv CUDA forward.
+#
+# IMPORTANT: the system-installed cuDNN on Vast.ai's PyTorch template is an
+# older version (typically 9.8) and wins on LD_LIBRARY_PATH over the bundled
+# one. You must prepend the bundled cuDNN lib path:
+#
+#     export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+#
+# This is baked into the Vast.ai runbook's .bashrc + launch scripts.
 linux-cuda = [
+    # nvidia-cudnn-cu12 is a transitive dep of torch (pinned to 9.19.0.56
+    # for torch 2.11+cu128). Do NOT re-pin here — it'd conflict with torch's
+    # exact version lock. But the shell LD_LIBRARY_PATH caveat above still
+    # applies, because Vast.ai hosts ship an older system cudnn.
     "nvidia-cusparselt-cu12>=0.5; sys_platform == 'linux'",
     "nvidia-nvshmem-cu12>=3.6; sys_platform == 'linux'",
 ]
