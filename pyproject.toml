@@ -31,6 +31,30 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# PyTorch CUDA build selection.
+#
+# Linux hosts (Vast.ai) resolve torch from PyPI's default wheel which is
+# compiled against the latest CUDA (13.x at the time of writing), requiring
+# driver 13+. Rental hosts typically ship driver 12.8 → the default wheel
+# fails with "CUDA initialization: NVIDIA driver too old." Pin the Linux
+# torch source to PyTorch's cu128 index so we get a CUDA 12.8-compatible
+# build (supports Blackwell sm_120 for RTX 5080 + 5090).
+#
+# macOS / Windows fall through to the default PyPI index (CPU/MPS wheels,
+# no CUDA requirement).
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/mkw_rl"]
 
