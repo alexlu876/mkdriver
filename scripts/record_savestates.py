@@ -121,8 +121,13 @@ def _pop_next_slug() -> str | None:
 
 
 # State carried across frames.
-_state = {
-    "prev_race_com": 0.0,
+# ``prev_race_com`` starts at None so the first frame seeds it without spuriously
+# firing the race-start edge detector — if a race is already running when the
+# script attaches (rare but possible), the prior ``0.0`` sentinel would make
+# ``prev < 1.0 <= race_com`` true on the very first tick and capture something
+# we didn't intend. The None sentinel forces a one-frame warmup.
+_state: dict = {
+    "prev_race_com": None,
     "captured_current_race": False,
 }
 
@@ -136,6 +141,14 @@ if not QUEUE_PATH.exists():
     )
 
 
+def _push_front(slug: str) -> None:
+    """Put ``slug`` back at the top of the queue file (for save-failure rollback)."""
+    existing = ""
+    if QUEUE_PATH.exists():
+        existing = QUEUE_PATH.read_text()
+    QUEUE_PATH.write_text(f"{slug}\n{existing}" if existing else f"{slug}\n")
+
+
 def on_frame() -> None:
     s = _state
     try:
@@ -147,6 +160,11 @@ def on_frame() -> None:
     prev = s["prev_race_com"]
     s["prev_race_com"] = race_com
 
+    # First-frame warmup: seed prev_race_com and skip edge detection so we
+    # don't spuriously fire if the script attaches during a running race.
+    if prev is None:
+        return
+
     # Edge: race_completion crossed 1.0 upward → race just started.
     if prev < 1.0 <= race_com and not s["captured_current_race"]:
         slug = _pop_next_slug()
@@ -156,23 +174,32 @@ def on_frame() -> None:
                 "Add a slug to the queue file and restart the race.",
                 flush=True,
             )
-        else:
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            out_path = OUTPUT_DIR / f"{slug}.sav"
-            try:
-                savestate.save_to_file(str(out_path))
-                print(
-                    f"[recorder] SAVED {slug} → {out_path.name} "
-                    f"(race_completion={race_com:.4f})",
-                    flush=True,
-                )
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"[recorder] save failed for {slug} ({type(e).__name__}: {e}) — "
-                    "slug consumed from queue; add it back manually if you want to retry",
-                    flush=True,
-                )
-        s["captured_current_race"] = True
+            # Still mark captured to avoid log spam every frame the race runs;
+            # user can add to the queue and restart the race to re-arm.
+            s["captured_current_race"] = True
+            return
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = OUTPUT_DIR / f"{slug}.sav"
+        try:
+            savestate.save_to_file(str(out_path))
+            print(
+                f"[recorder] SAVED {slug} → {out_path.name} "
+                f"(race_completion={race_com:.4f})",
+                flush=True,
+            )
+            s["captured_current_race"] = True
+        except Exception as e:  # noqa: BLE001
+            # Rollback the queue so the user can just retry the race rather
+            # than having to edit the queue file by hand.
+            _push_front(slug)
+            print(
+                f"[recorder] save failed for {slug} ({type(e).__name__}: {e}) — "
+                "rolled back onto queue; exit the race and retry",
+                flush=True,
+            )
+            # Don't set captured_current_race: allow a retry if the user
+            # re-enters this exact race.
 
     # Edge: race_completion dropped back below 1.0 → user exited. Arm for next.
     if prev >= 1.0 > race_com:

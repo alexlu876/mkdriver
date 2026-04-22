@@ -581,16 +581,11 @@ Phase 2 ends when offline metrics plateau and the user spot-checks a few predict
 
 ---
 
-## Phase 3 — All-32-tracks generalization (appendix stub)
+## Phase 3 — All-32-tracks generalization (appendix stub — superseded)
 
-Phase 3 converts the single-track BC model into a 32-track model. Work:
+> **Status**: superseded by the 2026-04-17 pivot. Multi-track support is no longer a separate phase; it's folded into the active Phase 2 (see `docs/PIVOT_2026-04-17.md`). The pre-pivot Phase 3 plan below is preserved as historical context but does not describe current work.
 
-- Build 32 savestates (one per vanilla track), Luigi Circuit → Rainbow Road, documented via `SAVESTATE_PROTOCOL.md` with exact VI counts per §0.4.
-- Collect demos per track. Budget: 10-20 laps per track = 320-640 demos total. Consider TAS `.dtm` imports for tracks the user drives poorly — now a real option since the LSTM can absorb the distribution shift if user + TAS demos share savestate anchors.
-- Train a single multi-track BC model, same architecture as Phase 2. Stateful LSTM from day one means no architectural change. Start with naive mixing; if underperforms, add a track-ID embedding concatenated to LSTM input.
-- Evaluate per-track and on a held-out "test track" (e.g., hold out DK Summit) to measure zero-shot generalization.
-
-**Do not attempt Phase 3 before Phase 4's RL env is working on Luigi Circuit.** Multi-track BC with no RL fine-tune is a less interesting result than single-track BC → RL.
+Pre-pivot Phase 3 scope was to convert a single-track BC model into a 32-track BC model via track-ID conditioning and TAS-demo augmentation. Post-pivot, BC is dormant and multi-track generalization is pursued directly in the RL agent via (a) a track-agnostic policy trained on a progress-weighted sampler across all available savestates, and (b) reward shaping that normalizes per-lap cumulative reward across tracks so long tracks don't dominate gradient signal. See `docs/TRAINING_METHODOLOGY.md` §§1-5.
 
 ---
 

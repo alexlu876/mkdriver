@@ -131,11 +131,13 @@ If the Dolphin fork is upgraded to a new SHA:
 
 ## Per-track savestate checklist
 
-Phase 1-2 scope:
+Post-pivot (2026-04-17): **all 32 tracks are now Phase 2 critical-path** per `docs/PIVOT_2026-04-17.md` — the multi-track BTR agent samples uniformly across available tracks, so each missing track is a hole in the curriculum. Luigi Circuit is the bring-up subset; the full list below is the target.
 
-- [ ] `luigi_circuit_tt.sav` + `.json` — Mario / Standard Kart / Time Trial.
+Bring-up subset (first real training run):
 
-Phase 3 scope (all 32 vanilla tracks):
+- [ ] `luigi_circuit_tt.sav` + `.json` — Mario / Standard Kart / Time Trial. (Staged 2026-04-21 from VIPTankz's shipped bundle.)
+
+Full Phase 2 scope (all 32 vanilla tracks):
 
 - [ ] Mushroom Cup (4 tracks).
 - [ ] Flower Cup (4).

@@ -27,7 +27,7 @@ Kept for now so our numbers are directly comparable to theirs. See
 the 2026-04-21 forensic audit of VIPTankz/Wii-RL for full analysis.
 
 1. **Importance-sampling exponent uses ``alpha`` instead of ``beta``**
-   (``sample()`` line in this file; VIPTankz's ``BTR.py:622``).
+   (see ``sample()`` in this file; VIPTankz's ``BTR.py:622``).
    VIPTankz's comment acknowledges this was an accident; they kept
    it because "it performs better". Net effect: IS correction is
    weaker than the PER paper prescribes — training sits closer to
@@ -388,7 +388,12 @@ class PER:
         Returns (tree_idxs, states, actions, rewards, n_states, dones, weights)
         where states/n_states are on ``self.device`` as float32 uint8-cast-to-
         float, and rewards/dones/actions are device tensors of appropriate dtype.
+
+        Raises ``RuntimeError`` if called on an empty buffer.
         """
+        if self.capacity == 0:
+            raise RuntimeError("PER.sample() called on empty buffer (capacity=0)")
+
         p_total = self.st.total()
 
         # Stratified sampling over the priority distribution.
@@ -403,11 +408,22 @@ class PER:
         pointers = self.pointer_mem[idxs]
         state_pointers = np.array([p[0] for p in pointers])
         n_state_pointers = np.array([p[1] for p in pointers])
-        reward_pointers = np.array([p[2] for p in pointers])
+
+        # Action is always the FIRST step of the n-step window. Use p[2][0]
+        # uniformly regardless of n_step: for n_step=1, p[2] is a length-1
+        # array and [0] gives the scalar; for n_step>1, [0] picks the first
+        # of the n rewards' corresponding action index.
+        # VIPTankz's conditional branch (BTR.py:599-602) caused a shape bug
+        # when n_step=1 — action_pointers ended up (B, 1) instead of (B,),
+        # propagating through to actions/rewards/dones as (B, 1) tensors.
+        # Unifying the path fixes it for both branches.
+        action_pointers = np.array([p[2][0] for p in pointers])
+
         if self.n_step > 1:
-            action_pointers = np.array([p[2][0] for p in pointers])
+            reward_pointers = np.array([p[2] for p in pointers])
         else:
-            action_pointers = np.array([p[2] for p in pointers])
+            # n=1: reward index is the same as the action index.
+            reward_pointers = action_pointers
 
         states = torch.tensor(self.state_mem[state_pointers], dtype=torch.uint8)
         n_states = torch.tensor(self.state_mem[n_state_pointers], dtype=torch.uint8)
@@ -481,14 +497,18 @@ class PER:
         # self._set_priority_min(idx - self.size + 1, sqrt(priority)) — see note above
 
         if np.isnan(priorities).any():
-            # Surface as a loud log + keep going rather than crashing; VIPTankz's
-            # training loops have logged this and recovered.
+            # Surface as a loud log + replace NaNs with eps. VIPTankz's code
+            # logged the warning but fell through to st.update with NaN values,
+            # corrupting the SumTree — subsequent sample() calls would raise
+            # OverflowError on np.random.uniform(0, NaN). We sanitize instead.
             import logging  # noqa: PLC0415 — local import, rarely hit
 
             logging.getLogger(__name__).warning(
                 "NaN found in priorities; this usually means the loss diverged. "
-                "priorities=%s", priorities
+                "Replacing %d NaN entries with eps to avoid SumTree corruption.",
+                int(np.isnan(priorities).sum()),
             )
+            priorities = np.nan_to_num(priorities, nan=self.eps)
 
         self.max_prio = max(self.max_prio, np.max(priorities))
         self.st.update(idxs, priorities**self.alpha)

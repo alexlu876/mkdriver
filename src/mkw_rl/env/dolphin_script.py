@@ -1,3 +1,9 @@
+# ruff: noqa: E402, F704, I001, PLR0912, PLR0915
+# This file is structurally atypical: it runs inside Dolphin's scripting
+# engine which supports top-level ``await`` and requires ``sys.path`` to
+# be set BEFORE our package imports are attempted. Stock Python lint
+# rules flag these as errors; silenced file-wide since every such
+# occurrence is intentional and documented in the module docstring.
 """Slave-side Dolphin scripting entry point (async top-level).
 
 Runs inside a Dolphin process via ``DolphinQt --script /path/to/dolphin_script.py``.
@@ -276,9 +282,14 @@ while True:
             # Pad pooled frames with the last captured frame so the obs is
             # well-defined even if we broke out before the normal capture window.
             if i < FRAMESKIP - FRAMES_POOLED:
-                # We haven't captured anything this window — grab one now.
-                (w, h, data) = await event.framedrawn()
-                last_img = _process_frame(data, w, h)
+                # Non-pooled branch — we awaited frameadvance() but did NOT
+                # capture an image for this frame. The prior implementation
+                # called event.framedrawn() here, which advances an additional
+                # frame — double-advance relative to the normal path. For
+                # terminal transitions we don't bootstrap, so the exact image
+                # doesn't affect Q-learning targets; fall back to reusing the
+                # last frame_stack entry to preserve single-frame semantics.
+                last_img = frame_stack[-1]
                 for j in range(FRAMES_POOLED):
                     pooled_frames[j] = last_img
             else:

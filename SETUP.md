@@ -10,7 +10,7 @@ This document covers the one-time setup a developer needs before working on mkw-
 | Python | `>=3.13` (via uv; see [.python-version](.python-version)) |
 | Game ID | `RMCP01` (PAL MKWii only — see [docs/REGION_DECISION.md](docs/REGION_DECISION.md)) |
 
-**⚠️ Submodule SHA is a placeholder.** The spec (§P-1) requires the user to build the fork themselves and report back the SHA they built against. Replace `d8358cb...` with that SHA before Phase 4. For Phase 1-2 work (BC pipeline), the submodule content isn't actually loaded or executed, so the placeholder is safe.
+**⚠️ Submodule SHA is a placeholder.** The spec (§P-1) requires the user to build the fork themselves and report back the SHA they built against. Replace `d8358cb...` with that SHA before live training runs (new Phase 2; was Phase 4 pre-pivot). For the dormant BC pipeline the submodule content isn't actually loaded or executed, so the placeholder is safe.
 
 ## Prerequisites
 
@@ -44,7 +44,7 @@ uv run pytest
 
 ## Install VIPTankz's Dolphin scripting distribution
 
-This is the external dependency that can't be installed via uv. VIPTankz wraps Felk's scripting fork and ships a pre-compiled arm64 macOS build via `scripts/download_dolphin.py`. The distribution provides a Python API (`from dolphin import memory, event, savestate, controller, gui`) which the Phase 4 gym wrapper depends on, and `.dtm` recording/replay which the Phase 1 data pipeline depends on.
+This is the external dependency that can't be installed via uv. VIPTankz wraps Felk's scripting fork and ships a pre-compiled arm64 macOS build via `scripts/download_dolphin.py`. The distribution provides a Python API (`from dolphin import memory, event, savestate, controller, gui`) which the gym wrapper in the active training path (`src/mkw_rl/env/`) depends on, and `.dtm` recording/replay which the dormant BC demo pipeline (`src/mkw_rl/dtm/`, `src/mkw_rl/bc/`) depends on.
 
 1. Clone the repo to a working directory **outside** this project:
 

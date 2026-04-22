@@ -286,6 +286,47 @@ class TestPER:
         assert discounted[0] == pytest.approx(1.0 + 0.99 + 0.99**2, abs=1e-6)
         assert done_out[0] is np.False_ or not done_out[0]
 
+    def test_sample_shapes_with_n_step_1(self) -> None:
+        """Regression: VIPTankz's conditional at BTR.py:599-602 produced a
+        (B, 1) shape for actions/rewards/dones when n_step=1 (should be (B,))."""
+        per = self._make_per(size=32, n=1)
+        state = _random_stack()
+        n_state = _random_stack()
+        for _ in range(20):
+            per.append(state, action=0, reward=0.5, n_state=n_state, done=False, trun=False, stream=0)
+        _, _, actions, rewards, _, dones, weights = per.sample(4)
+        # All per-sample tensors should be 1-D of length batch_size.
+        assert actions.shape == (4,), f"n=1 actions shape drift: {actions.shape}"
+        assert rewards.shape == (4,), f"n=1 rewards shape drift: {rewards.shape}"
+        assert dones.shape == (4,), f"n=1 dones shape drift: {dones.shape}"
+        assert weights.shape == (4,), f"n=1 weights shape drift: {weights.shape}"
+
+    def test_update_priorities_replaces_nans(self) -> None:
+        """Regression: raw VIPTankz code fell through to SumTree.update with NaN
+        priorities, corrupting the tree and causing subsequent sample() to
+        raise OverflowError. We replace NaNs with eps instead."""
+        per = self._make_per(size=16, n=1)
+        state = _random_stack()
+        n_state = _random_stack()
+        for _ in range(10):
+            per.append(state, action=0, reward=1.0, n_state=n_state, done=False, trun=False, stream=0)
+        tree_idxs, *_ = per.sample(2)
+
+        # Inject a NaN priority — should NOT poison the SumTree.
+        per.update_priorities(np.array([tree_idxs[0]]), np.array([float("nan")]))
+
+        # Tree should still be sample-able.
+        per.sample(2)
+        # And total priority should be finite.
+        assert np.isfinite(per.st.total())
+
+    def test_sample_on_empty_buffer_raises(self) -> None:
+        """Regression: empty-buffer sample triggered NaN retry loop in raw code.
+        Now raises a clear RuntimeError."""
+        per = self._make_per(size=32, n=3)
+        with pytest.raises(RuntimeError, match="empty buffer"):
+            per.sample(4)
+
     def test_compute_discounted_rewards_breaks_on_done(self) -> None:
         per = self._make_per(size=16, n=3)
         rewards = np.array([[1.0, 1.0, 1.0]])

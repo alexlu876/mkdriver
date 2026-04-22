@@ -34,7 +34,7 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from mkw_rl.env.track_meta import TrackMetadata, load_track_metadata
+from mkw_rl.env.track_meta import load_track_metadata
 
 log = logging.getLogger(__name__)
 
@@ -201,7 +201,6 @@ class MkwDolphinEnv(gym.Env):
                 "Record it via scripts/record_savestates.py first."
             )
 
-        self._current_track_slug = track_slug
         meta_dict = asdict(self.track_metadata[track_slug])
         self._conn.send(("reset", str(savestate_path), meta_dict))
 
@@ -210,7 +209,10 @@ class MkwDolphinEnv(gym.Env):
         # if anything went wrong on the slave side (load failure, RAM read
         # error, etc.). EOFError on recv means the slave crashed / Dolphin
         # exited — surface as a clear exception rather than letting it
-        # propagate unwrapped.
+        # propagate unwrapped. In all error cases we leave
+        # ``self._current_track_slug`` unchanged (committing it only on
+        # reset_ok) so a failed reset doesn't poison subsequent step info
+        # dicts with a slug the env isn't actually on.
         try:
             msg = self._conn.recv()
         except EOFError as exc:
@@ -225,6 +227,9 @@ class MkwDolphinEnv(gym.Env):
             )
         if not (isinstance(msg, tuple) and msg[0] == "reset_ok"):
             raise RuntimeError(f"unexpected reset reply from slave: {msg!r}")
+
+        # Reset succeeded — commit the new slug.
+        self._current_track_slug = track_slug
         obs = np.frombuffer(msg[1], dtype=np.uint8).reshape(
             FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH
         ).copy()  # copy because frombuffer returns a view into the transient bytes
@@ -271,7 +276,7 @@ class MkwDolphinEnv(gym.Env):
         self._current_track_slug = None
 
     # Gym idioms.
-    def __enter__(self) -> "MkwDolphinEnv":
+    def __enter__(self) -> MkwDolphinEnv:
         return self
 
     def __exit__(self, *_args: object) -> None:

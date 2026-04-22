@@ -107,6 +107,10 @@ class BTRPolicy(nn.Module):
     def __init__(self, config: BTRConfig | None = None) -> None:
         super().__init__()
         self.cfg = config or BTRConfig()
+        # Mirror mkw_rl.bc.model.BCPolicy which exposes ``self.config``; future
+        # code that polymorphically probes "what's this policy configured with?"
+        # can use either attribute without branching on type.
+        self.config = self.cfg
 
         self.encoder = ImpalaEncoder(
             in_channels=self.cfg.stack_size,

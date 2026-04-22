@@ -93,3 +93,16 @@ These are not primary design levers but context we want on hand during training 
 - **LSTM state at replay time**. Start with burn-in approach. If memory footprint is a problem, fall back to stored-hidden-state approach (R2D2 style).
 - **World record times to populate `data/track_metadata.yaml`.** User task. No-glitch category on speedrun.com/mkwii.
 - **Retro Rewind tracks reward function**. Out of scope (region conflict anyway — see `docs/REGION_DECISION.md`).
+
+## Inherited implementation quirks (2026-04-21 VIPTankz audit)
+
+A forensic audit of VIPTankz/Wii-RL's BTR.py turned up several deviations from the PER paper (Schaul et al. 2016) and the IQN paper (Dabney et al. 2018) that VIPTankz's code carries. These are **deliberate** in our port — we match VIPTankz's code so our numbers stay directly comparable to their published BTR results. Once training is stable on multi-track, we plan to A/B test "faithful PER" vs "VIPTankz PER" on Luigi Circuit to see whether the accidental divergences actually help or hurt.
+
+1. **PER importance-sampling exponent uses `alpha` instead of `beta`** (see `src/mkw_rl/rl/replay.py` — Known Deviations #1). VIPTankz's comment at `BTR.py:622` acknowledges this was accidental ("performs better"). Net effect: IS correction is weaker than spec; training sits closer to vanilla prioritized sampling.
+2. **No PER beta annealing.** `priority_weight_increase` exists but is never consumed in the sampler (since the sampler uses alpha per #1). Our port drops it entirely.
+3. **Batch-min IS weight normalization** rather than buffer-min. `weights / weights.max()` where the theoretical-correct normalizer is the min priority across the whole buffer.
+4. **Raw |δ| priority** instead of quantile-Huber-adjusted. Dopamine and ku2482 use the Huber loss value; VIPTankz uses raw TD magnitude.
+5. **Cosine embedding index `{0..n_cos-1}`** (VIPTankz convention) instead of the canonical `{1..n_cos}` from Dabney eq. 4. The `i=0` term gives `cos(0)=1` for every τ — wastes one basis dim on a constant the Linear's bias already provides. Kept for weight-transfer compatibility with VIPTankz's pre-trained model.
+6. **Storage multiplier bumped 1.25→1.75** in our port (not a deviation from paper, a MKWii tuning). VIPTankz's 1.25 sizes the frame pool for Atari's ~20-frame episodes; MKWii episodes are ~1000 frames, so 1.25 is below their own back-of-envelope minimum. Configurable via PER constructor.
+
+See `src/mkw_rl/rl/replay.py` docstring for the full tradeoff analysis per item.
