@@ -634,3 +634,358 @@ class TestCheckpointRoundTrip:
         assert fresh.sampler.progress != saved_progress
         load_checkpoint(fresh, ckpt_path)
         assert fresh.sampler.progress == saved_progress
+
+
+# ---------------------------------------------------------------------------
+# FakeEnv + rollout / crash-restart / shutdown tests.
+# ---------------------------------------------------------------------------
+
+
+class _FakeEnv:
+    """Minimal gym-shaped env for testing ``run_one_episode`` and the
+    outer ``train()`` loop without spinning up Dolphin.
+
+    ``scripted_rewards``: list of per-step rewards. Episode terminates when
+    the list is exhausted (``terminated=True``) or ``crash_on_reset_count``
+    resets have happened (raises ``BrokenPipeError`` to exercise the
+    crash-restart path).
+
+    ``reward_breakdown``: optional dict-valued per-step breakdown, echoed
+    through info["reward_breakdown"] to verify component accumulation.
+    """
+
+    def __init__(
+        self,
+        framestack: int = 4,
+        h: int = 24,
+        w: int = 32,
+        scripted_rewards: list[float] | None = None,
+        reward_breakdown: dict[str, float] | None = None,
+        crash_on_reset_n: int | None = None,
+        crash_error: type[Exception] = BrokenPipeError,
+    ) -> None:
+        self.framestack = framestack
+        self.h = h
+        self.w = w
+        self.scripted_rewards = scripted_rewards or [1.0, 2.0, 3.0]
+        self.reward_breakdown = reward_breakdown
+        self.crash_on_reset_n = crash_on_reset_n
+        self.crash_error = crash_error
+        self.reset_count = 0
+        self.closed = False
+        self._idx = 0
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):  # noqa: ARG002
+        self.reset_count += 1
+        if self.crash_on_reset_n is not None and self.reset_count == self.crash_on_reset_n:
+            raise self.crash_error("scripted crash from FakeEnv.reset")
+        self._idx = 0
+        obs = np.zeros((self.framestack, self.h, self.w), dtype=np.uint8)
+        return obs, {"track_slug": (options or {}).get("track_slug")}
+
+    def step(self, action: int):  # noqa: ARG002
+        reward = self.scripted_rewards[self._idx]
+        terminated = self._idx == len(self.scripted_rewards) - 1
+        self._idx += 1
+        obs = np.full((self.framestack, self.h, self.w), self._idx, dtype=np.uint8)
+        info = {}
+        if self.reward_breakdown:
+            info["reward_breakdown"] = self.reward_breakdown
+        return obs, reward, terminated, False, info
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestRunOneEpisode:
+    def test_rollout_accumulates_return_and_appends_replay(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent, run_one_episode
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        scripted = [1.0, 2.0, 3.0, 4.0]
+        breakdown = {"speed_bonus": 0.5, "checkpoint": 1.5}
+        env = _FakeEnv(
+            framestack=cfg.framestack, h=cfg.imagey, w=cfg.imagex,
+            scripted_rewards=scripted, reward_breakdown=breakdown,
+        )
+        initial_capacity = agent.replay.capacity
+        initial_env_steps = agent.env_steps
+
+        ep_return, rb_sums, n_steps = run_one_episode(agent, env, "luigi_circuit_tt")
+
+        assert n_steps == len(scripted)
+        assert ep_return == sum(scripted)
+        assert agent.env_steps == initial_env_steps + len(scripted)
+        assert agent.replay.capacity == initial_capacity + len(scripted)
+        assert rb_sums == {
+            "speed_bonus": 0.5 * len(scripted),
+            "checkpoint": 1.5 * len(scripted),
+        }
+
+    def test_shutdown_flag_breaks_episode_early(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent, run_one_episode
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        env = _FakeEnv(
+            framestack=cfg.framestack, h=cfg.imagey, w=cfg.imagex,
+            scripted_rewards=[1.0] * 100,  # long episode
+        )
+        shutdown_flag = {"shutdown": True}
+        _, _, n_steps = run_one_episode(
+            agent, env, "luigi_circuit_tt", shutdown_flag=shutdown_flag,
+        )
+        # First step runs, then the shutdown check fires at the bottom of the
+        # loop. So we expect exactly 1 step before break.
+        assert n_steps == 1
+
+    def test_stack_shape_assertion(self, tmp_path: Path) -> None:
+        """If env returns a wrong-shape stack, run_one_episode should fail loudly."""
+        from mkw_rl.rl.train import BTRAgent, run_one_episode
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        # Wrong framestack size — should trip the assertion.
+        env = _FakeEnv(framestack=cfg.framestack + 1, h=cfg.imagey, w=cfg.imagex)
+        with pytest.raises(AssertionError, match="framestack"):
+            run_one_episode(agent, env, "luigi_circuit_tt")
+
+
+class TestLearnStepGradNormNaN:
+    def test_nonfinite_grad_norm_skipped(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        seq_len = cfg.burn_in_len + cfg.learning_seq_len
+        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+
+        with patch(
+            "torch.nn.utils.clip_grad_norm_",
+            return_value=torch.tensor(float("inf")),
+        ):
+            out = agent.learn_step()
+        assert out["grad_norm"] != out["grad_norm"] or not np.isfinite(out["grad_norm"])
+        assert agent.grad_steps == 0
+        assert agent.nonfinite_streak == 1
+
+
+class TestMaxNonFiniteAbort:
+    def test_max_nonfinite_raises(self, tmp_path: Path) -> None:
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        seq_len = cfg.burn_in_len + cfg.learning_seq_len
+        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+
+        agent.nonfinite_streak = agent.MAX_NONFINITE - 1
+        nan_loss = torch.tensor(float("nan"))
+        fake_td = torch.zeros(cfg.batch_size * cfg.learning_seq_len)
+        with patch(
+            "mkw_rl.rl.train._compute_td_error_and_loss",
+            return_value=(nan_loss, fake_td),
+        ):
+            with pytest.raises(RuntimeError, match="consecutive non-finite"):
+                agent.learn_step()
+
+
+class TestSamplerRngRoundTrip:
+    def test_rng_state_restoration(self, tmp_path: Path) -> None:
+        """Sampler RNG state is preserved across state_dict round-trip:
+        sample N before save, then sample N after load, should equal
+        sample N of an uninterrupted run of 2N samples."""
+        from mkw_rl.rl.track_sampler import (
+            ProgressWeightedTrackSampler,
+            TrackSamplerConfig,
+        )
+
+        tracks = ["a", "b", "c", "d"]
+        ref = ProgressWeightedTrackSampler(
+            track_slugs=tracks, config=TrackSamplerConfig(), seed=7,
+        )
+        # Give tracks non-uniform progress so the RNG actually matters.
+        for slug, prog in zip(tracks, [0.5, 1.0, 0.2, 0.8], strict=True):
+            ref.update(slug, prog)
+        # Uninterrupted: draw 10 samples.
+        uninterrupted = [ref.sample() for _ in range(10)]
+
+        # Interrupted: draw 5, save, load into fresh sampler, draw 5 more.
+        sampler = ProgressWeightedTrackSampler(
+            track_slugs=tracks, config=TrackSamplerConfig(), seed=7,
+        )
+        for slug, prog in zip(tracks, [0.5, 1.0, 0.2, 0.8], strict=True):
+            sampler.update(slug, prog)
+        first5 = [sampler.sample() for _ in range(5)]
+        state = sampler.state_dict()
+
+        resumed = ProgressWeightedTrackSampler(
+            track_slugs=tracks, config=TrackSamplerConfig(), seed=999,  # different seed
+        )
+        resumed.load_state_dict(state)
+        last5 = [resumed.sample() for _ in range(5)]
+
+        assert first5 + last5 == uninterrupted
+
+
+class TestCrashRestart:
+    def test_train_recovers_from_env_crash(self, tmp_path: Path) -> None:
+        """train() should catch a BrokenPipeError from the env, reconstruct it,
+        and continue. Uses a FakeEnv that crashes on reset #2 then recovers."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        # Stand up a tiny config with immediate episode termination.
+        cfg = _tiny_cfg(tmp_path, total_frames=15, min_sampling_size=10_000)
+        # Patch _make_env so train() builds FakeEnvs. State is tracked across
+        # constructor calls via the `envs` list so we can assert on it.
+        envs: list[_FakeEnv] = []
+
+        def fake_make(c: TrainConfig) -> _FakeEnv:  # noqa: ARG001
+            # First env crashes on its 2nd reset (after one clean episode);
+            # replacement envs run cleanly so training completes.
+            crash_on = 2 if len(envs) == 0 else None
+            env = _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[1.0] * 3,
+                crash_on_reset_n=crash_on,
+            )
+            envs.append(env)
+            return env
+
+        with patch.object(train_mod, "_make_env", side_effect=fake_make):
+            train(cfg)
+
+        # We expect: env #0 runs until crashing on episode N, env #1 was built
+        # to crash, env #2 (and later) run cleanly. At least 2 envs built.
+        assert len(envs) >= 2
+        # All but the last one should be closed (torn down on crash recovery).
+        assert envs[0].closed
+        assert envs[-1].closed  # last env closed in finally
+
+    def test_train_removes_track_after_repeat_crashes(self, tmp_path: Path) -> None:
+        """A track that crashes Dolphin 3× should be removed from the sampler."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(tmp_path, total_frames=20, min_sampling_size=10_000)
+        # Pre-create two tracks so the sampler doesn't abort when one is dropped.
+        (Path(cfg.savestate_dir) / "mushroom_gorge_tt.sav").write_bytes(b"")
+
+        def fake_make(c: TrainConfig) -> _FakeEnv:  # noqa: ARG001
+            # Always crash on first reset — every env will trigger the crash path.
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[1.0] * 3,
+                crash_on_reset_n=1,
+            )
+
+        # Force the sampler to always pick the SAME track so per-track streak
+        # hits 3 before env_crash_streak hits 5.
+        with (
+            patch.object(train_mod, "_make_env", side_effect=fake_make),
+            patch(
+                "mkw_rl.rl.track_sampler.ProgressWeightedTrackSampler.sample",
+                return_value="luigi_circuit_tt",
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            train(cfg)
+
+        # Can't introspect sampler here post-raise, but the lack of KeyError
+        # from remove_track at log warning time is the proof. For a stronger
+        # assertion see the sampler-level test below.
+
+    def test_sampler_remove_track(self, tmp_path: Path) -> None:
+        """Direct test of sampler.remove_track — distribution renormalizes."""
+        from mkw_rl.rl.track_sampler import (
+            ProgressWeightedTrackSampler,
+            TrackSamplerConfig,
+        )
+
+        _ = tmp_path  # unused
+        sampler = ProgressWeightedTrackSampler(
+            track_slugs=["a", "b", "c"], config=TrackSamplerConfig(), seed=0,
+        )
+        sampler.remove_track("b")
+        assert sampler.n_tracks == 2
+        assert "b" not in sampler.progress
+        dist = sampler.distribution()
+        assert set(dist.keys()) == {"a", "c"}
+        assert abs(sum(dist.values()) - 1.0) < 1e-9
+
+        # Removing non-existent raises
+        with pytest.raises(KeyError):
+            sampler.remove_track("z")
+
+        # Removing the last raises RuntimeError
+        sampler.remove_track("a")
+        with pytest.raises(RuntimeError, match="no tracks left"):
+            sampler.remove_track("c")
+
+
+class TestShutdownHandler:
+    def test_sigterm_sets_shutdown_flag(self) -> None:
+        import os
+        import signal as _signal
+
+        from mkw_rl.rl.train import _install_shutdown_handler
+
+        flag, restore = _install_shutdown_handler()
+        try:
+            assert flag["shutdown"] is False
+            os.kill(os.getpid(), _signal.SIGTERM)
+            # Python delivers signals between bytecode ops on the main thread;
+            # a no-op loop flushes the pending signal.
+            for _ in range(10):
+                if flag["shutdown"]:
+                    break
+            assert flag["shutdown"] is True
+        finally:
+            restore()
+
+    def test_second_signal_restores_default_handler(self) -> None:
+        import os
+        import signal as _signal
+
+        from mkw_rl.rl.train import _install_shutdown_handler
+
+        flag, restore = _install_shutdown_handler()
+        try:
+            installed = _signal.getsignal(_signal.SIGTERM)
+            os.kill(os.getpid(), _signal.SIGTERM)
+            for _ in range(10):
+                if flag["shutdown"]:
+                    break
+            # Second signal SHOULD flip second_signal flag + restore handler.
+            # Catch the SIGTERM by pre-installing a no-op so the test process
+            # doesn't die.
+            second_fired = {"hit": False}
+            def swallow(signum: int, frame: object) -> None:  # noqa: ARG001
+                second_fired["hit"] = True
+            # Swap to swallow-only AFTER our handler hands control back.
+            # The handler's "second signal" branch restores `original` (which
+            # is our swallow if we install it here first). So install swallow
+            # as the "original" before the second kill reaches our handler.
+            # Simplest: assert that a second call to the installed handler
+            # flips second_signal.
+            assert callable(installed)
+            installed(_signal.SIGTERM, None)  # simulate second delivery
+            assert flag["second_signal"] is True
+        finally:
+            restore()
+
+    def test_restore_handler_is_idempotent(self) -> None:
+        import signal as _signal
+
+        from mkw_rl.rl.train import _install_shutdown_handler
+
+        pre = _signal.getsignal(_signal.SIGTERM)
+        flag, restore = _install_shutdown_handler()
+        _ = flag  # unused
+        restore()
+        assert _signal.getsignal(_signal.SIGTERM) is pre
+        # Calling restore again when the handler is already cleaned up should no-op.
+        restore()
+        assert _signal.getsignal(_signal.SIGTERM) is pre

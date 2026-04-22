@@ -10,7 +10,12 @@ data:
 
 env:
   env_id: 0                                  # socket port offset (26330 + env_id)
-  # dolphin_app + iso left unset → MkwDolphinEnv defaults (dev-machine paths)
+  # Optional — override MkwDolphinEnv's dev-machine defaults. REQUIRED on any
+  # host where Dolphin or the ISO don't live at the author's local paths
+  # (e.g., Vast.ai). Leave commented out to use the dev-machine defaults.
+  # dolphin_app: "/opt/dolphin/DolphinQt.app"
+  # iso: "/opt/mkw/mkw.iso"
+  # mkw_rl_src: "/workspace/mkwii/src"
 
 model:
   # Architecture (passes 1+2). Must stay in sync with src/mkw_rl/rl/model.py BTRConfig.
@@ -80,7 +85,11 @@ testing:
     linear_size: 64
   replay:
     size: 1024
-    storage_size_multiplier: 2.0             # smaller ratio bites faster at tiny size
+    # Bumped from 2.0 → 4.0: a single 1000-frame MKWii episode can fill the
+    # frame pool before the pointer table fills, wrapping state_mem and
+    # silently pointing pointer_mem at overwritten frames. 4.0 gives the
+    # pool a 4K slot cushion vs the 1K pointer cap.
+    storage_size_multiplier: 4.0
   training:
     batch_size: 4
     min_sampling_size: 64                    # warm up quickly

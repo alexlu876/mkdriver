@@ -226,10 +226,17 @@ class ProgressWeightedTrackSampler:
     # ------------------------------------------------------------------
 
     def state_dict(self) -> dict[str, Any]:
-        """Serialize progress EMA + RNG state for checkpoint resume.
+        """Serialize progress EMA + this sampler's dedicated RNG state.
 
-        The RNG state is preserved so post-resume ``sample()`` sequences
-        match the uninterrupted run (under a fixed seed).
+        .. note::
+            Only this sampler's ``_rng`` (a ``numpy.random.Generator`` keyed
+            on the init-time seed) is restored. Global ``torch.random``,
+            ``numpy.random``, and ``random`` RNG state are NOT saved — they
+            re-seed from ``cfg.seed`` on each resume. So post-resume sample
+            sequences from THIS sampler match an uninterrupted run, but
+            replay's numpy-global-RNG and the noisy-net's torch-RNG do not
+            (they restart from ``cfg.seed``). Full determinism-across-resume
+            is not currently supported.
         """
         return {
             "progress": dict(self.progress),
@@ -239,11 +246,32 @@ class ProgressWeightedTrackSampler:
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore from ``state_dict()``. Silently keeps tracks that weren't
         in the saved state at cold-start progress (e.g., user added a savestate
-        between the ckpt and the resume)."""
+        between the ckpt and the resume). Tracks present at save time but
+        absent from the current build (e.g., user deleted a savestate) are
+        silently dropped — their EMA is lost on resume."""
         for slug, p in state["progress"].items():
             if slug in self.progress:
                 self.progress[slug] = float(p)
         self._rng.bit_generator.state = state["rng_state"]
+
+    def remove_track(self, slug: str) -> None:
+        """Remove a track from the sampler (mid-training).
+
+        Raises ``KeyError`` if the slug isn't currently sampled. Safe to call
+        from the training loop when a track's savestate is found to be corrupt
+        (repeated Dolphin crashes) — the sampler stops drawing it and the
+        distribution renormalizes over the remaining tracks.
+        """
+        if slug not in self.progress:
+            raise KeyError(f"track {slug!r} not present in sampler")
+        del self.progress[slug]
+        self.track_slugs = [s for s in self.track_slugs if s != slug]
+        if not self.progress:
+            raise RuntimeError(
+                "removed the last track — sampler has no tracks left. "
+                "This means every known savestate has been disqualified "
+                "(corrupt or crashing); abort training + inspect savestate integrity."
+            )
 
 
 def construct_from_available(

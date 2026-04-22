@@ -116,6 +116,6 @@ Training-loop deviations (documented in `src/mkw_rl/rl/train.py` module docstrin
 8. **Priority signal uses `mean(dim=tau).mean(dim=tau)`** (scale-invariant) rather than VIPTankz's `sum(dim=tau).mean(dim=tau)` which scales with num_tau. Avoids priorities drifting with num_tau changes during tuning.
 9. **Sequence-level priority aggregation** per R2D2 §2.3 eq. 1: `η·max_t|δ_t| + (1-η)·mean_t|δ_t|` with `η=0.9`. VIPTankz is feed-forward so they update transition-level priorities directly; our LSTM variant needs this aggregation.
 10. **Target-net sync cadence 200 grad steps** (not VIPTankz's 500). MKWii's non-stationarity across tracks rewards a faster-tracking target. Revisit if A/B testing shows it doesn't matter.
-11. **No ε-greedy schedule** — we drop VIPTankz's 25M-frame ε-decay and rely on noisy-nets exploration alone. Simplifies the training loop; if exploration is too weak early, reintroduce.
+11. **No ε-greedy schedule** — we drop VIPTankz's 100M-frame ε-disable schedule (`BTR.py:943`) and rely on noisy-nets exploration alone. Simplifies the training loop; if exploration is too weak early, reintroduce.
 
 See `src/mkw_rl/rl/replay.py`, `src/mkw_rl/rl/model.py`, and `src/mkw_rl/rl/train.py` docstrings for full per-item analysis.

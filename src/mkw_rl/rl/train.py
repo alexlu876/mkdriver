@@ -32,6 +32,7 @@ import csv
 import logging
 import os
 import random
+import re
 import signal
 import time
 from dataclasses import dataclass, field
@@ -69,6 +70,12 @@ class TrainConfig:
 
     # env
     env_id: int = 0
+    # Optional — override MkwDolphinEnv's dev-machine defaults. Required for
+    # any host where Dolphin / the ISO don't live at the author's local paths
+    # (e.g., Vast.ai). Leave as None to use MkwDolphinEnv's defaults.
+    dolphin_app: str | None = None
+    iso: str | None = None
+    mkw_rl_src: str | None = None
 
     # model (forwarded into BTRConfig)
     stack_size: int = 4
@@ -161,7 +168,7 @@ def load_config(path: str | Path, testing: bool = False) -> TrainConfig:
         if src in raw.get("data", {}):
             kw[dst] = raw["data"][src]
     if "env" in raw:
-        for k in ("env_id",):
+        for k in ("env_id", "dolphin_app", "iso", "mkw_rl_src"):
             if k in raw["env"]:
                 kw[k] = raw["env"][k]
     if "model" in raw:
@@ -235,6 +242,11 @@ class _CSVLogger:
     with the extended header and all previous rows (padded). The file is
     always readable by ``pandas.read_csv`` at any point.
 
+    Resume-safe: if a CSV already exists at ``path``, the existing header and
+    rows are parsed in and new rows append in the same file. This means a
+    resumed training run (which reuses ``run_name``) writes a continuous log
+    instead of creating a fresh file per resume.
+
     Small per-run log volume makes the rewrite cost negligible vs the
     alternative (malformed headers or silently-dropped columns)."""
 
@@ -243,10 +255,29 @@ class _CSVLogger:
         self.path = path
         self._columns: list[str] = ["step"]
         self._rows: list[dict[str, Any]] = []
-        self._fh = open(path, "w", buffering=1)  # line-buffered
+
+        # Resume-safe: preload any existing rows + columns. If the file is
+        # empty or unreadable as CSV, start fresh.
+        existing = path.exists() and path.stat().st_size > 0
+        if existing:
+            try:
+                with open(path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    if reader.fieldnames:
+                        self._columns = list(reader.fieldnames)
+                        self._rows = list(reader)
+            except (OSError, csv.Error) as e:
+                log.warning("could not parse existing CSV at %s (%s); starting fresh", path, e)
+                existing = False
+
+        # Always open in append so partial-write safety is better than
+        # truncate-on-startup. The rewrite path still truncates, but only when
+        # a new column forces it.
+        self._fh = open(path, "a", buffering=1)  # line-buffered
         self._writer = csv.DictWriter(self._fh, fieldnames=self._columns)
-        self._writer.writeheader()
-        self._fh.flush()
+        if not existing:
+            self._writer.writeheader()
+            self._fh.flush()
 
     def _rewrite(self) -> None:
         """Rewrite the whole file with the current ``_columns`` + ``_rows``.
@@ -279,27 +310,78 @@ class _CSVLogger:
 
 
 class _WandbLogger:
-    """Thin wandb wrapper — caller provides project/run_name via config."""
+    """Wandb wrapper with transient-failure tolerance + CSV fallback.
 
-    def __init__(self, project: str, run_name: str, config: dict) -> None:
+    - Uses ``resume="allow"`` + ``id=run_name`` so a resumed training run
+      (same ``run_name``) stitches onto the original wandb run rather than
+      starting a new one. Charts stay continuous across Vast.ai preemptions.
+    - Individual ``log()`` calls swallow exceptions and count consecutive
+      failures. After ``MAX_FAILURES`` in a row (network blip, wandb
+      maintenance, etc.), we permanently switch to a CSV fallback so an
+      8-hour training run doesn't die to a 30-second network hiccup.
+    """
+
+    MAX_FAILURES = 5
+
+    def __init__(
+        self,
+        project: str,
+        run_name: str,
+        config: dict,
+        fallback_csv_path: Path,
+    ) -> None:
         import wandb  # noqa: PLC0415 — optional dep
         self._wandb = wandb
-        self._run = wandb.init(project=project, name=run_name, config=config)
+        # id must match run_name for resume stitching; wandb accepts any
+        # alphanumeric-underscore string.
+        self._run = wandb.init(
+            project=project, name=run_name, id=run_name,
+            resume="allow", config=config,
+        )
+        self._fail_count = 0
+        self._fallback_csv_path = fallback_csv_path
+        self._fallback: _CSVLogger | None = None
 
     def log(self, metrics: dict[str, float], step: int) -> None:
-        self._wandb.log(metrics, step=step)
+        if self._fallback is not None:
+            self._fallback.log(metrics, step)
+            return
+        try:
+            self._wandb.log(metrics, step=step)
+            self._fail_count = 0
+        except Exception as e:  # noqa: BLE001 - any wandb internal failure
+            self._fail_count += 1
+            log.warning(
+                "wandb.log failed (%s); fail_count=%d/%d",
+                e, self._fail_count, self.MAX_FAILURES,
+            )
+            if self._fail_count >= self.MAX_FAILURES:
+                log.error(
+                    "wandb.log failed %d× consecutively; demoting to CSV at %s",
+                    self.MAX_FAILURES, self._fallback_csv_path,
+                )
+                self._fallback = _CSVLogger(self._fallback_csv_path)
+                self._fallback.log(metrics, step)
 
     def close(self) -> None:
-        self._run.finish()
+        if self._fallback is not None:
+            try:
+                self._fallback.close()
+            except Exception:  # noqa: BLE001
+                log.exception("error closing CSV fallback")
+        try:
+            self._run.finish()
+        except Exception:  # noqa: BLE001
+            log.exception("error finishing wandb run")
 
 
 def make_logger(cfg: TrainConfig, run_name: str) -> Logger:
+    csv_path = Path(cfg.log_dir) / f"{run_name}.csv"
     if os.environ.get("WANDB_API_KEY"):
         try:
-            return _WandbLogger(cfg.wandb_project, run_name, cfg.__dict__)
+            return _WandbLogger(cfg.wandb_project, run_name, cfg.__dict__, csv_path)
         except Exception as e:  # noqa: BLE001
             log.warning("wandb init failed (%s); falling back to CSV", e)
-    csv_path = Path(cfg.log_dir) / f"{run_name}.csv"
     log.info("using CSV logger at %s", csv_path)
     return _CSVLogger(csv_path)
 
@@ -469,9 +551,12 @@ class BTRAgent:
     env_steps: int = field(default=0)
     # Consecutive non-finite loss/grad events — abort after MAX_NONFINITE to
     # avoid silently training on NaN weights. Reset by any finite step.
+    # With entropy_tau=0.03, one Q-overflow can poison target-sync in ~200
+    # steps; 10 is forgiving enough for transients while still bailing before
+    # the Adam moments go NaN across the full net.
     nonfinite_streak: int = field(default=0)
 
-    MAX_NONFINITE: int = 50
+    MAX_NONFINITE: int = 10
 
     @classmethod
     def build(cls, cfg: TrainConfig) -> BTRAgent:
@@ -842,19 +927,68 @@ def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _install_shutdown_handler() -> dict[str, bool]:
-    """Install SIGTERM handler + KeyboardInterrupt-safe shutdown flag.
+def _make_env(cfg: TrainConfig) -> MkwDolphinEnv:
+    """Construct an ``MkwDolphinEnv`` from a ``TrainConfig``.
 
-    Returns a mutable dict {"shutdown": bool} that ``run_one_episode`` polls
-    between env steps. A second SIGTERM bypasses graceful exit (prevents a
-    wedged shutdown from blocking a second preempt signal).
+    Uses whatever optional paths the config carries (``dolphin_app``, ``iso``,
+    ``mkw_rl_src``) and falls through to ``MkwDolphinEnv`` defaults for the
+    ones left unset. Centralized so the initial launch and the crash-restart
+    path stay in sync — a silent divergence here produces the exact
+    "restart-clobbers-custom-paths" bug.
     """
-    flag = {"shutdown": False, "second_signal": False}
+    kwargs: dict[str, Any] = {
+        "env_id": cfg.env_id,
+        "savestate_dir": cfg.savestate_dir,
+        "track_metadata_path": cfg.track_metadata_path,
+    }
+    if cfg.dolphin_app is not None:
+        kwargs["dolphin_app"] = cfg.dolphin_app
+    if cfg.iso is not None:
+        kwargs["iso"] = cfg.iso
+    if cfg.mkw_rl_src is not None:
+        kwargs["mkw_rl_src"] = cfg.mkw_rl_src
+    return MkwDolphinEnv(**kwargs)
+
+
+def _infer_run_name_from_ckpt(path: Path | str) -> str:
+    """Derive a stable ``run_name`` from a checkpoint filename.
+
+    Strips any of the suffixes our checkpoint layout produces:
+      ``{run_name}_grad{N}.pt`` → ``{run_name}``
+      ``{run_name}_final.pt`` → ``{run_name}``
+      ``{run_name}_diverged.pt`` → ``{run_name}``
+
+    This keeps log files + subsequent checkpoints under the same ``run_name``
+    across preemption/resume, so wandb charts stitch and CSVs stay
+    append-compatible.
+    """
+    stem = Path(path).stem  # drop .pt
+    for suffix in ("_final", "_diverged"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    m = re.match(r"(.+)_grad\d+$", stem)
+    if m:
+        return m.group(1)
+    return stem
+
+
+def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
+    """Install SIGTERM handler + return ``(flag_dict, restore_fn)``.
+
+    The returned mutable dict ``{"shutdown": bool, "second_signal": bool}`` is
+    polled by ``run_one_episode`` between env steps (first-signal path) and
+    at the outer loop boundary. A second SIGTERM bypasses graceful exit — the
+    default handler is reinstated so a third kill takes the process down.
+
+    The returned ``restore_fn()`` is for ``train()`` to call in its ``finally``
+    block so the SIGTERM handler doesn't leak across sequential ``train()``
+    calls (tests, orchestrators, etc.).
+    """
+    flag: dict[str, bool] = {"shutdown": False, "second_signal": False}
     original = signal.getsignal(signal.SIGTERM)
 
     def handler(signum: int, frame: object) -> None:
         if flag["shutdown"]:
-            # Second signal — restore default handler so a repeat kill works.
             log.warning("received second signal %d; restoring default handler", signum)
             signal.signal(signal.SIGTERM, original if callable(original) else signal.SIG_DFL)
             flag["second_signal"] = True
@@ -866,13 +1000,20 @@ def _install_shutdown_handler() -> dict[str, bool]:
         flag["shutdown"] = True
 
     signal.signal(signal.SIGTERM, handler)
-    return flag
+
+    def restore() -> None:
+        current = signal.getsignal(signal.SIGTERM)
+        if current is handler:
+            signal.signal(signal.SIGTERM, original if callable(original) else signal.SIG_DFL)
+
+    return flag, restore
 
 
 def train(
     cfg: TrainConfig,
     env: MkwDolphinEnv | None = None,
     resume_from: Path | str | None = None,
+    run_name: str | None = None,
 ) -> BTRAgent:
     """Main training driver. Constructs agent, runs episodes until
     ``total_frames`` env steps, logs + checkpoints per config cadence.
@@ -880,73 +1021,98 @@ def train(
     ``resume_from``: path to a ``_save_checkpoint`` output; if provided, the
     agent's weights/optimizer/counters are restored before training resumes.
     Replay is re-warmed from scratch (see ``load_checkpoint`` docstring).
+
+    ``run_name``: explicit run identifier (also used for wandb run ID and
+    CSV log filename). If omitted and ``resume_from`` is given, the run_name
+    is inferred from the checkpoint filename so resumed runs keep writing to
+    the same log/ckpt namespace. If omitted and not resuming, a timestamp
+    string is generated.
     """
-    # Seed all RNGs BTRAgent.build doesn't cover. torch + numpy are seeded in
-    # BTRAgent.build; stdlib random is covered here for any transitive deps.
     random.seed(cfg.seed)
 
     agent = BTRAgent.build(cfg)
     if resume_from is not None:
         load_checkpoint(agent, resume_from)
 
-    run_name = time.strftime("btr_%Y%m%d_%H%M%S")
+    if run_name is None:
+        if resume_from is not None:
+            run_name = _infer_run_name_from_ckpt(resume_from)
+            log.info("inferred run_name=%s from resume path", run_name)
+        else:
+            run_name = time.strftime("btr_%Y%m%d_%H%M%S")
+
     logger = make_logger(cfg, run_name)
     log.info("starting training — run=%s device=%s", run_name, cfg.device)
 
     if env is None:
-        env = MkwDolphinEnv(
-            env_id=cfg.env_id,
-            savestate_dir=cfg.savestate_dir,
-            track_metadata_path=cfg.track_metadata_path,
-        )
+        env = _make_env(cfg)
 
-    shutdown_flag = _install_shutdown_handler()
+    shutdown_flag, restore_sigterm = _install_shutdown_handler()
     episode_idx = 0
     env_crash_streak = 0
+    track_crash_counts: dict[str, int] = {}
     MAX_ENV_CRASHES = 5
+    MAX_TRACK_CRASHES = 3
     last_warmup_log_env_steps = 0
+    # Flag set when learn_step's NaN-streak abort fires. Used in `finally:` to
+    # redirect the save to `_diverged.pt` instead of overwriting the last clean
+    # `_final.pt` with poisoned weights (which resume would silently re-load).
+    aborted_due_to_divergence = False
     try:
         while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
             track_slug = agent.sampler.sample()
 
-            # Env-level crash recovery: socket EOFError / BrokenPipeError /
-            # ConnectionResetError indicate Dolphin died or the IPC socket
-            # dropped. Tear down + relaunch; abort if crashes cluster.
             try:
                 ep_return, rb_sums, n_steps = run_one_episode(
                     agent, env, track_slug,
                     logger=logger, shutdown_flag=shutdown_flag,
                 )
                 env_crash_streak = 0
+            except RuntimeError as exc:
+                # NaN-abort path from learn_step — propagate but flag so the
+                # finally: block saves to _diverged.pt, preserving a forensic
+                # trail and sparing the last clean _final.pt.
+                if "consecutive non-finite" in str(exc):
+                    aborted_due_to_divergence = True
+                    log.error("training diverged — will save as _diverged.pt")
+                raise
             except (EOFError, BrokenPipeError, ConnectionResetError, OSError) as exc:
                 env_crash_streak += 1
+                track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
                 log.error(
-                    "env crashed mid-episode (%s); streak=%d/%d — relaunching Dolphin",
-                    exc, env_crash_streak, MAX_ENV_CRASHES,
+                    "env crashed mid-episode on %s (%s); env_streak=%d/%d track_streak=%d/%d — relaunching",
+                    track_slug, exc,
+                    env_crash_streak, MAX_ENV_CRASHES,
+                    track_crash_counts[track_slug], MAX_TRACK_CRASHES,
                 )
                 if env_crash_streak >= MAX_ENV_CRASHES:
                     raise RuntimeError(
                         f"aborting: {MAX_ENV_CRASHES} consecutive env crashes. "
                         "Dolphin is likely unrecoverable; check its log + savestate integrity."
                     ) from exc
+                # Per-track: if a specific savestate keeps crashing Dolphin,
+                # remove it from the curriculum rather than looping forever.
+                if track_crash_counts[track_slug] >= MAX_TRACK_CRASHES:
+                    try:
+                        agent.sampler.remove_track(track_slug)
+                        log.warning(
+                            "track %s crashed %d times; removed from sampler. "
+                            "Inspect data/savestates/%s.sav for corruption.",
+                            track_slug, track_crash_counts[track_slug], track_slug,
+                        )
+                    except KeyError:
+                        pass  # already removed — race between duplicate crashes
                 try:
                     env.close()
                 except Exception:  # noqa: BLE001 - best-effort cleanup
                     pass
-                # Fresh env; next iter will _ensure_running → relaunch.
-                env = MkwDolphinEnv(
-                    env_id=cfg.env_id,
-                    savestate_dir=cfg.savestate_dir,
-                    track_metadata_path=cfg.track_metadata_path,
-                )
+                # Fresh env from the SAME cfg — custom dolphin_app/iso paths survive.
+                env = _make_env(cfg)
                 continue
 
             agent.sampler.update(track_slug, ep_return)
             episode_idx += 1
 
-            # Warmup progress log — replay capacity ratio is the key signal
-            # while waiting for min_sampling_size; emit prominently so users
-            # don't mistake a warming run for a stuck one.
             replay_fill = agent.replay.capacity / max(cfg.min_sampling_size, 1)
             if (
                 replay_fill < 1.0
@@ -977,6 +1143,7 @@ def train(
 
             if (
                 agent.grad_steps > 0
+                and cfg.checkpoint_every_grad_steps > 0
                 and agent.grad_steps % cfg.checkpoint_every_grad_steps == 0
             ):
                 ckpt_path = Path(cfg.log_dir) / f"{run_name}_grad{agent.grad_steps}.pt"
@@ -985,10 +1152,13 @@ def train(
         log.warning("KeyboardInterrupt — saving final checkpoint before exit")
         shutdown_flag["shutdown"] = True
     finally:
-        # Always emit a final checkpoint on exit (graceful shutdown, crash,
-        # or normal completion) so no training is lost between ckpt intervals.
+        # On NaN-abort, save to _diverged.pt instead of _final.pt — otherwise a
+        # `--resume` from _final.pt silently re-loads the poisoned weights.
+        # Ckpt layout: {run_name}_grad{N}.pt (periodic), {run_name}_final.pt
+        # (clean exit), {run_name}_diverged.pt (NaN abort).
+        suffix = "_diverged" if aborted_due_to_divergence else "_final"
         try:
-            final_path = Path(cfg.log_dir) / f"{run_name}_final.pt"
+            final_path = Path(cfg.log_dir) / f"{run_name}{suffix}.pt"
             _save_checkpoint(agent, cfg, final_path)
         except Exception:  # noqa: BLE001 — don't mask the original exception
             log.exception("failed to save final checkpoint")
@@ -1000,5 +1170,6 @@ def train(
             logger.close()
         except Exception:  # noqa: BLE001
             log.exception("error closing logger")
+        restore_sigterm()
 
     return agent

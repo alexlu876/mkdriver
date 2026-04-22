@@ -39,7 +39,10 @@ uv run python scripts/train_btr.py --config configs/btr.yaml --testing
 # Production run (500M env steps — consume Vast.ai compute).
 uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda
 
-# Resume from a checkpoint after preemption / crash.
+# Resume from a checkpoint after preemption / crash. Replay buffer is NOT
+# checkpointed, so the first ~200K env steps post-resume are random-policy
+# warmup (<0.1% of a 500M-frame run). run_name is inferred from the ckpt
+# filename so wandb charts + CSV logs stitch across resumes.
 uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda \
   --resume runs/btr/btr_20260422_123456_final.pt
 ```

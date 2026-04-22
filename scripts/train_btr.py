@@ -78,6 +78,15 @@ def main() -> int:
         help="Resume from a checkpoint .pt produced by a previous run "
         "(restores online/target/optimizer/counters; replay is re-warmed).",
     )
+    ap.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Override the auto-generated run_name (used as wandb run ID + "
+        "CSV log filename). If omitted and --resume is given, run_name is "
+        "inferred from the checkpoint filename so logs + ckpts stay in the "
+        "same namespace across resumes.",
+    )
     args = ap.parse_args()
 
     # Deferred import so logging config above takes effect before any mkw_rl
@@ -104,7 +113,7 @@ def main() -> int:
         print(f"error: resume checkpoint {args.resume} not found", file=sys.stderr)
         return 1
 
-    train(cfg, resume_from=args.resume)
+    train(cfg, resume_from=args.resume, run_name=args.run_name)
     return 0
 
 
