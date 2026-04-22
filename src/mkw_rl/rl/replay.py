@@ -19,6 +19,36 @@ mixes 2 and 4), and method-docstring polish have been touched. The
 commented-out priority_min code and alternate vectorized n-step helper
 are preserved as comments so future diffs against VIPTankz stay legible.
 
+Known deviations from the PER paper (Schaul et al. 2016)
+---------------------------------------------------------
+These are faithful to VIPTankz's published code and produce the BTR
+paper's results; they are **not** faithful to the textbook PER spec.
+Kept for now so our numbers are directly comparable to theirs. See
+the 2026-04-21 forensic audit of VIPTankz/Wii-RL for full analysis.
+
+1. **Importance-sampling exponent uses ``alpha`` instead of ``beta``**
+   (``sample()`` line in this file; VIPTankz's ``BTR.py:622``).
+   VIPTankz's comment acknowledges this was an accident; they kept
+   it because "it performs better". Net effect: IS correction is
+   weaker than the PER paper prescribes — training sits closer to
+   vanilla prioritized sampling. If we ever see instability, swap
+   to ``** -self.beta`` and restore a beta schedule.
+2. **No beta annealing.** VIPTankz wires a ``priority_weight_increase``
+   but never consumes it in the sampler (since the sampler uses
+   alpha — see #1). We don't implement annealing either.
+3. **Batch-min IS-weight normalization** instead of buffer-min. The
+   code normalizes ``weights / weights.max()``; the theoretically-
+   correct normalization uses the min priority in the entire buffer.
+   VIPTankz comments at ``BTR.py:456-459`` describe the tradeoff
+   (faster; "makes effectively no difference").
+4. **Raw |δ| used as priority** (not Huber-adjusted). Dopamine and
+   ku2482 use the quantile-Huber loss value instead; VIPTankz uses
+   raw TD magnitude. Preserved.
+5. **Storage multiplier default bumped from 1.25 → 1.75** for MKWii
+   (episodes are ~1000 frames vs Atari's ~20). VIPTankz's 1.25 is
+   under their own back-of-envelope minimum for long-episode tasks;
+   we err generous. Configurable via constructor.
+
 .. note::
     This module is pass-1 scope. Pass 3 will add an R2D2-style
     ``sample_sequences(batch_size, burn_in, learn_window)`` method that
@@ -140,6 +170,7 @@ class PER:
         imagex: int = 84,
         imagey: int = 84,
         rgb: bool = False,
+        storage_size_multiplier: float = 1.75,  # VIPTankz default 1.25; bumped for MKWii
     ) -> None:
         self.st = SumTree(size)
         self.data = [None for _ in range(size)]
@@ -148,15 +179,23 @@ class PER:
 
         # Frame-pool storage is sized larger than the pointer table because
         # each stack spans 4 frames and n-step reaches further. VIPTankz's
-        # heuristic: size * 1.25 (discrete) or size * 4 (RGB).
-        # Comment from original (preserved):
-        # the technical size to ensure there are no errors with overwritten memory
-        # in theory is very high — (2*framestack - overlap) * first_states + non_first_states
-        # with N=3, framestack=4, size=1M, avg ep 20 → ~1.35M frame slots.
+        # original heuristic was size * 1.25 (discrete) or size * 4 (RGB).
+        #
+        # Comment from VIPTankz (preserved):
+        # > the technical size to ensure there are no errors with overwritten
+        # > memory in theory is very high — (2*framestack - overlap) *
+        # > first_states + non_first_states. With N=3, framestack=4, size=1M,
+        # > avg ep 20 → ~1.35M frame slots.
+        #
+        # MKWii episodes are ~1000+ frames (vs Atari's ~20), so frame pointers
+        # can be written into faster than they're sampled for training,
+        # potentially scrambling stored frame-stacks on the first buffer wrap.
+        # We default to 1.75 (configurable) to give headroom. See the 2026-04-21
+        # forensic audit for details.
         if rgb:
-            self.storage_size = int(size * 4)
+            self.storage_size = int(size * max(4.0, storage_size_multiplier * 4))
         else:
-            self.storage_size = int(size * 1.25)
+            self.storage_size = int(size * storage_size_multiplier)
         self.gamma = gamma
         self.capacity = 0
 
@@ -263,7 +302,12 @@ class PER:
             # Slide the window by one timestep.
             self.state_buffer[stream].pop(0)
             self.reward_buffer[stream].pop(0)
-            self.beta = 0
+            # NOTE: VIPTankz's BTR.py:508 has `self.beta = 0` here. It's dead
+            # code (beta is never read by sample() — see module-level deviation
+            # #1). Removed for clarity. If we ever switch to `** -self.beta`
+            # in the IS-weight formula and restore a proper beta schedule,
+            # this location is wrong for the clobber anyway — the schedule
+            # lives in the Agent, not the replay buffer.
 
     def finalize_experiences(self, stream: int) -> None:
         """Emit remaining experiences at episode boundary with zero-padded reward tail."""
