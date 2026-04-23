@@ -682,12 +682,20 @@ class BTRAgent:
         self,
         frames: torch.Tensor,
         hidden: tuple[torch.Tensor, torch.Tensor] | None,
+        deterministic: bool = False,
     ) -> tuple[int, tuple[torch.Tensor, torch.Tensor]]:
         """Greedy (noisy-nets) action selection for rollout. ``frames`` is a
         single step ``(1, 1, stack, H, W)`` uint8. Hidden state is carried
-        by the caller across the episode and reset at episode boundaries."""
+        by the caller across the episode and reset at episode boundaries.
+
+        ``deterministic=True``: skips ``reset_noise()`` so noisy-nets stays
+        at whatever state the caller put it in (typically 0'd via
+        ``disable_noise()``). Used by ``scripts/eval_btr.py`` to get
+        reproducible greedy rollouts against a frozen checkpoint.
+        """
         with torch.no_grad():
-            self.online_net.reset_noise()
+            if not deterministic:
+                self.online_net.reset_noise()
             q, new_hidden = self.online_net.q_values(
                 frames.to(self.device), hidden=hidden, advantages_only=True
             )
@@ -858,6 +866,7 @@ def run_one_episode(
     stream: int = 0,
     agent_lock: "threading.Lock | None" = None,
     skip_learn: bool = False,
+    deterministic: bool = False,
 ) -> tuple[float, dict[str, float], int]:
     """Run a single episode. Transitions are appended to replay; one learn
     step per env step (replay_ratio=1) fires when replay is warmed up.
@@ -876,6 +885,8 @@ def run_one_episode(
     - ``skip_learn``: in multi-env runs the rollout threads only collect
       transitions; the main thread owns the learn-step cadence. Setting this
       to True makes the function pure rollout.
+    - ``deterministic``: passed through to ``agent.act``. True = noisy-nets
+      frozen (caller must have called ``disable_noise()``), used for eval.
 
     Returns (episode_return, reward_component_sums, n_steps).
     """
@@ -911,7 +922,7 @@ def run_one_episode(
         # To tensor for action selection: (1, 1, stack, H, W).
         obs_t = torch.from_numpy(obs).unsqueeze(0).unsqueeze(0)
         with lock:
-            action, hidden = agent.act(obs_t, hidden)
+            action, hidden = agent.act(obs_t, hidden, deterministic=deterministic)
 
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated

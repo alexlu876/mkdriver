@@ -1105,6 +1105,191 @@ class TestMultiEnv:
             train(cfg, env=stub_env)
 
 
+class TestDeterministicAct:
+    """Coverage for ``agent.act(deterministic=True)`` — the noisy-nets
+    bypass used by scripts/eval_btr.py. Verifies that:
+
+    - deterministic=True skips reset_noise() (so previously-disabled
+      noise stays disabled)
+    - run_one_episode plumbs the flag through
+    """
+
+    def test_deterministic_does_not_reset_noise(self, tmp_path: Path) -> None:
+        """After disable_noise(), a deterministic act() leaves ε at zero;
+        a non-deterministic one re-samples and ε becomes non-zero."""
+        from mkw_rl.rl.networks import FactorizedNoisyLinear
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        agent.online_net.disable_noise()
+
+        # Find the first noisy layer and confirm it starts at ε=0 after disable.
+        noisy_layers = [
+            m for m in agent.online_net.modules() if isinstance(m, FactorizedNoisyLinear)
+        ]
+        assert noisy_layers, "test assumes BTR model has noisy linears"
+        layer = noisy_layers[0]
+        assert torch.all(layer.weight_epsilon == 0)
+
+        frames = torch.zeros(
+            1, 1, cfg.stack_size, cfg.imagey, cfg.imagex, dtype=torch.uint8
+        )
+        # deterministic=True: noise stays at zero.
+        agent.act(frames, hidden=None, deterministic=True)
+        assert torch.all(layer.weight_epsilon == 0), (
+            "deterministic=True should not call reset_noise()"
+        )
+
+        # Default (deterministic=False): noise gets re-sampled → non-zero.
+        agent.act(frames, hidden=None)
+        assert torch.any(layer.weight_epsilon != 0), (
+            "default act() should call reset_noise() which samples non-zero ε"
+        )
+
+    def test_run_one_episode_passes_deterministic_flag(self, tmp_path: Path) -> None:
+        """``run_one_episode(deterministic=True)`` must forward the flag to
+        agent.act on every step — not only the first."""
+        from mkw_rl.rl.train import BTRAgent, run_one_episode
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        env = _FakeEnv(
+            framestack=cfg.framestack, h=cfg.imagey, w=cfg.imagex,
+            scripted_rewards=[0.1, 0.2, 0.3, 0.4, 0.5],
+        )
+
+        seen_flags: list[bool] = []
+        original_act = agent.act
+
+        def spy_act(frames, hidden, deterministic=False):  # noqa: ANN001, ANN202, FBT002
+            seen_flags.append(deterministic)
+            return original_act(frames, hidden, deterministic=deterministic)
+
+        agent.act = spy_act  # type: ignore[method-assign]
+        run_one_episode(agent, env, "luigi_circuit_tt", deterministic=True)
+
+        assert len(seen_flags) == 5, f"expected 5 act() calls, got {len(seen_flags)}"
+        assert all(seen_flags), "deterministic=True should reach every act() call"
+
+
+class TestEvalBtrScript:
+    """Coverage for scripts/eval_btr.py via FakeEnv — no live Dolphin needed."""
+
+    def test_eval_main_produces_summary_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run eval_btr.main() end-to-end: build agent, write ckpt, patch
+        _make_env to return a FakeEnv, eval 2 episodes, verify the output
+        JSON has correct structure + returns match scripted rewards."""
+        import importlib
+        import json as _json
+        import sys as _sys
+
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import BTRAgent, _save_checkpoint
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+        ckpt_path = tmp_path / "test_ckpt.pt"
+        _save_checkpoint(agent, cfg, ckpt_path)
+
+        # Write a YAML config that load_config can parse — needs savestate_dir
+        # + track_metadata path pointed at real files. _tiny_cfg already made
+        # the savestate; fabricate a minimal YAML + track_metadata.
+        yaml_path = tmp_path / "eval_cfg.yaml"
+        yaml_path.write_text(
+            f"""data:
+  savestate_dir: "{cfg.savestate_dir}"
+  track_metadata_path: "{tmp_path / 'track_meta.yaml'}"
+env:
+  env_id: 0
+  num_envs: 1
+model:
+  stack_size: {cfg.stack_size}
+  input_hw: [{cfg.imagey}, {cfg.imagex}]
+  encoder_channels: [{cfg.encoder_channels[0]}, {cfg.encoder_channels[1]}, {cfg.encoder_channels[2]}]
+  feature_dim: {cfg.feature_dim}
+  lstm_hidden: {cfg.lstm_hidden}
+  lstm_layers: {cfg.lstm_layers}
+  linear_size: {cfg.linear_size}
+  num_tau: {cfg.num_tau}
+  n_cos: {cfg.n_cos}
+  layer_norm: {str(cfg.layer_norm).lower()}
+replay:
+  size: {cfg.replay_size}
+  storage_size_multiplier: {cfg.storage_size_multiplier}
+  framestack: {cfg.framestack}
+  imagex: {cfg.imagex}
+  imagey: {cfg.imagey}
+  n_step: {cfg.n_step}
+training:
+  batch_size: {cfg.batch_size}
+  burn_in_len: {cfg.burn_in_len}
+  learning_seq_len: {cfg.learning_seq_len}
+  min_sampling_size: {cfg.min_sampling_size}
+runtime:
+  device: cpu
+"""
+        )
+        # Minimal track metadata YAML — just enough to make load_track_metadata happy.
+        # Schema per data/track_metadata.yaml + src/mkw_rl/env/track_meta.py's
+        # required fields.
+        (tmp_path / "track_meta.yaml").write_text(
+            """luigi_circuit_tt:
+  name: "Luigi Circuit"
+  cup: mushroom
+  wr_seconds: 68.733
+  wr_category: non_glitch
+  laps: 3
+"""
+        )
+
+        # Patch _make_env in the module eval_btr.main imports from.
+        def fake_make(c: TrainConfig, env_id: int | None = None) -> _FakeEnv:  # noqa: ARG001
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[1.0, 2.0, 3.0, 4.0],  # sum = 10.0
+                reward_breakdown={"checkpoint": 0.5, "speed": 0.5},
+            )
+
+        monkeypatch.setattr(train_mod, "_make_env", fake_make)
+
+        out_json = tmp_path / "eval_out.json"
+        argv = [
+            "eval_btr.py",
+            "--ckpt", str(ckpt_path),
+            "--config", str(yaml_path),
+            "--track-slug", "luigi_circuit_tt",
+            "--episodes", "2",
+            "--device", "cpu",
+            "--output", str(out_json),
+        ]
+        monkeypatch.setattr(_sys, "argv", argv)
+
+        # Import (or reimport) eval_btr from scripts/.
+        scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+        monkeypatch.syspath_prepend(str(scripts_dir))
+        if "eval_btr" in _sys.modules:
+            eval_btr = importlib.reload(_sys.modules["eval_btr"])
+        else:
+            eval_btr = importlib.import_module("eval_btr")
+
+        rc = eval_btr.main()
+        assert rc == 0, f"eval_btr.main returned {rc}"
+        assert out_json.exists()
+
+        payload = _json.loads(out_json.read_text())
+        assert "summary" in payload
+        assert "per_episode" in payload
+        assert payload["summary"]["episodes"] == 2
+        assert len(payload["per_episode"]) == 2
+        # FakeEnv scripted_rewards sum is 10.0; both episodes should return ~10.
+        for ep in payload["per_episode"]:
+            assert ep["return"] == 10.0
+            assert ep["length"] == 4
+        assert payload["summary"]["return_mean"] == 10.0
+        assert payload["summary"]["return_std"] == 0.0
+
+
 class TestCleanupStaleX11State:
     """Coverage for _cleanup_stale_x11_state — the fix for the Vast.ai
     Dolphin-SIGSEGV-after-10-orphans issue. Without this, the function
