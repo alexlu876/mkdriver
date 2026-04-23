@@ -1540,8 +1540,8 @@ def train(
                 env_crash_streak += 1
                 track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
                 log.error(
-                    "env crashed mid-episode on %s (%s); env_streak=%d/%d track_streak=%d/%d — relaunching",
-                    track_slug, exc,
+                    "env crashed mid-episode on %s (%s: %r); env_streak=%d/%d track_streak=%d/%d — relaunching",
+                    track_slug, type(exc).__name__, str(exc),
                     env_crash_streak, MAX_ENV_CRASHES,
                     track_crash_counts[track_slug], MAX_TRACK_CRASHES,
                 )
