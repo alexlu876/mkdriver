@@ -79,6 +79,36 @@ def main() -> int:
         "parallel rollout; each env_id=0..N-1 uses its own dolphin{i}/ dir "
         "(run scripts/setup_dolphin_instances.py to clone them first).",
     )
+    # Shakedown overrides. Production warmup is ~3h; each bug that surfaces
+    # past warmup costs ~3h to discover. These flags let us run the full
+    # production model + batch_size + threading stack with a TINY warmup
+    # (couple minutes) and a TINY post-warmup training window, so a 10-min
+    # shakedown verifies the whole pipeline end-to-end instead of just
+    # checking imports. See SETUP.md "Shakedown runs".
+    ap.add_argument(
+        "--min-sampling-size",
+        type=int,
+        default=None,
+        help="Override training.min_sampling_size (warmup env-step threshold). "
+        "Default None keeps the YAML value (200_000 in production). Lower "
+        "to 2000-5000 for shakedown runs.",
+    )
+    ap.add_argument(
+        "--total-frames",
+        type=int,
+        default=None,
+        help="Override training.total_frames (run length in env steps). "
+        "Default None keeps the YAML value (500M in production). Lower "
+        "to min_sampling_size + 20000 or so for shakedown runs.",
+    )
+    ap.add_argument(
+        "--checkpoint-every-grad-steps",
+        type=int,
+        default=None,
+        help="Override logging.checkpoint_every_grad_steps. Default None "
+        "keeps the YAML value (10000). Lower for shakedowns to exercise "
+        "the periodic-ckpt + rotation paths within the run window.",
+    )
     ap.add_argument(
         "--resume",
         type=Path,
@@ -115,6 +145,31 @@ def main() -> int:
             print(f"error: --num-envs must be >= 1, got {args.num_envs}", file=sys.stderr)
             return 1
         cfg.num_envs = args.num_envs
+    if args.min_sampling_size is not None:
+        if args.min_sampling_size < 1:
+            print(
+                f"error: --min-sampling-size must be >= 1, got {args.min_sampling_size}",
+                file=sys.stderr,
+            )
+            return 1
+        cfg.min_sampling_size = args.min_sampling_size
+    if args.total_frames is not None:
+        if args.total_frames < 1:
+            print(
+                f"error: --total-frames must be >= 1, got {args.total_frames}",
+                file=sys.stderr,
+            )
+            return 1
+        cfg.total_frames = args.total_frames
+    if args.checkpoint_every_grad_steps is not None:
+        if args.checkpoint_every_grad_steps < 0:
+            print(
+                f"error: --checkpoint-every-grad-steps must be >= 0, got "
+                f"{args.checkpoint_every_grad_steps}",
+                file=sys.stderr,
+            )
+            return 1
+        cfg.checkpoint_every_grad_steps = args.checkpoint_every_grad_steps
 
     if args.testing:
         logging.getLogger(__name__).info(

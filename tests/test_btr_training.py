@@ -1608,6 +1608,113 @@ class TestCleanupStaleX11State:
         assert not stale_socket.exists(), "600s-old stale X socket should be removed"
 
 
+class TestTrainBtrCli:
+    """CLI-override plumbing for scripts/train_btr.py. These are the flags
+    used by the shakedown workflow — a miswired override would silently
+    train at production defaults (3-hour warmup) when the user thought
+    they were running a 10-min shakedown."""
+
+    @staticmethod
+    def _import_entry() -> object:
+        """Import scripts/train_btr.py without running it."""
+        import importlib.util as _util
+        spec = _util.spec_from_file_location(
+            "train_btr_entry",
+            Path(__file__).resolve().parents[1] / "scripts" / "train_btr.py",
+        )
+        assert spec and spec.loader
+        mod = _util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _run_main_with_argv(
+        self,
+        tmp_path: Path,
+        extra_argv: list[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> TrainConfig:
+        """Stub train() to capture the cfg it receives, then invoke main()."""
+        import sys as _sys
+
+        captured: dict[str, TrainConfig] = {}
+
+        def fake_train(cfg: TrainConfig, *, env=None, resume_from=None, run_name=None):  # noqa: ARG001, ANN001
+            captured["cfg"] = cfg
+
+        entry = self._import_entry()
+
+        # main() does a deferred `from mkw_rl.rl.train import load_config, train`;
+        # patch the train symbol after the import resolves. Simplest way:
+        # pre-insert a stub module so the import returns our fake.
+        import mkw_rl.rl.train as train_mod
+        monkeypatch.setattr(train_mod, "train", fake_train)
+
+        # Write a minimal YAML that load_config can parse.
+        yaml_path = tmp_path / "cli.yaml"
+        yaml_path.write_text(
+            "data:\n  savestate_dir: data/savestates\n  track_metadata_path: data/track_metadata.yaml\n"
+            "env:\n  env_id: 0\n  num_envs: 1\n"
+            "training:\n  batch_size: 256\n  min_sampling_size: 200000\n  total_frames: 500000000\n"
+            "logging:\n  checkpoint_every_grad_steps: 10000\n"
+            "runtime:\n  device: cpu\n"
+        )
+
+        argv = ["train_btr.py", "--config", str(yaml_path), *extra_argv]
+        monkeypatch.setattr(_sys, "argv", argv)
+        rc = entry.main()
+        assert rc == 0, f"main() returned {rc}"
+        return captured["cfg"]
+
+    def test_min_sampling_size_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = self._run_main_with_argv(
+            tmp_path, ["--min-sampling-size", "2000"], monkeypatch,
+        )
+        assert cfg.min_sampling_size == 2000
+
+    def test_total_frames_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = self._run_main_with_argv(
+            tmp_path, ["--total-frames", "30000"], monkeypatch,
+        )
+        assert cfg.total_frames == 30000
+
+    def test_checkpoint_every_grad_steps_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = self._run_main_with_argv(
+            tmp_path, ["--checkpoint-every-grad-steps", "500"], monkeypatch,
+        )
+        assert cfg.checkpoint_every_grad_steps == 500
+
+    def test_no_overrides_keeps_yaml_values(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = self._run_main_with_argv(tmp_path, [], monkeypatch)
+        # Values come from the fabricated YAML above — prod-like.
+        assert cfg.min_sampling_size == 200000
+        assert cfg.total_frames == 500000000
+        assert cfg.checkpoint_every_grad_steps == 10000
+
+    def test_bad_min_sampling_size_exits_nonzero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """--min-sampling-size 0 is invalid; main() returns 1 with a clear
+        stderr message instead of silently doing something weird."""
+        import sys as _sys
+
+        entry = self._import_entry()
+        yaml_path = tmp_path / "cli.yaml"
+        yaml_path.write_text(
+            "data:\n  savestate_dir: data/savestates\n  track_metadata_path: data/track_metadata.yaml\n"
+            "env:\n  env_id: 0\n  num_envs: 1\n"
+            "runtime:\n  device: cpu\n"
+        )
+        argv = ["train_btr.py", "--config", str(yaml_path), "--min-sampling-size", "0"]
+        monkeypatch.setattr(_sys, "argv", argv)
+        rc = entry.main()
+        assert rc == 1
+        assert "must be >= 1" in capsys.readouterr().err
+
+
 class TestCheckpointRotation:
     def test_prune_keeps_last_n(self, tmp_path: Path) -> None:
         # Create 7 fake grad ckpts with increasing mtimes.

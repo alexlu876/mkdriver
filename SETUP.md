@@ -144,6 +144,35 @@ Known scaling quirks (Vast.ai 64-core EPYC + RTX 5080):
 - **Replay buffer** already supports per-env streams (`PER(envs=N, ...)` path) — no changes needed.
 - **Env rate**: ~6 env-steps/sec per Dolphin on this hardware, ~12 env-steps/sec with 2 envs. At `min_sampling_size=200K` that's ~4–5 h of warmup before the first gradient.
 
+### Shakedown runs
+
+Before committing to a multi-hour production run, do a ~10-minute shakedown with the **full production model + batch size + threading** but tiny warmup + run length. This catches bugs that only fire past the warmup gate (CUDA OOM on first learn-step, exception-type misclassifications, memory fragmentation, etc.) without eating 3h per iteration.
+
+```bash
+# On Vast, 4-env shakedown:
+.venv/bin/python scripts/train_btr.py \
+    --config configs/btr.yaml \
+    --num-envs 4 \
+    --device cuda \
+    --min-sampling-size 2000 \
+    --total-frames 30000 \
+    --checkpoint-every-grad-steps 1000 \
+    --run-name shakedown_$(date -u +%Y%m%d_%H%M%S)
+```
+
+What this exercises end-to-end:
+- 4-Dolphin launch + slave handshake + X11 cleanup
+- 2000 env-steps of warmup (≈90s at ~22 env-steps/sec with 4 envs)
+- Transition to learn-step — this is where OOMs fire
+- Several periodic `_grad{N}.pt` checkpoints + rotation
+- Clean exit at `total_frames` → `_final.pt` written WITH embedded replay
+
+What it doesn't catch:
+- Bugs that only appear after long drift (weeks of training)
+- Anything tied to specific grad-step schedules (e.g., `target_replace_grad_steps=200` triggers cleanly within the window but LR schedulers or long-horizon priority decays may not)
+
+**Workflow**: run the shakedown after any non-trivial change to training/env code before launching production. If it passes, swap the override flags out and commit to the long run.
+
 ## What's next
 
 - Complete [P-1](docs/PREFLIGHT.md) and record its output.
