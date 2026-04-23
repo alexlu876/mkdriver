@@ -1198,16 +1198,21 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
 
 # Minimum age (seconds) for an X11/xvfb artifact to be considered "stale".
 # Anything younger than this is assumed to belong to a live xvfb-run — we
-# leave it alone. 5 min is well past Dolphin boot (~2s) but tight enough
-# that a run crashing minutes before this runs still gets cleaned up.
-_X11_STALE_AGE_S = 300.0
+# leave it alone. 60s is well past Dolphin boot (~2s) while tight enough
+# to clean up just-crashed orphans before they accumulate. Originally
+# 300s; tightened after a 4-env resume run hit track_streak=3/3 within
+# 20s when env-3's orphans from the aborted run were still 'live' by
+# the 300s threshold, preventing the fresh X11 cleanup from removing
+# them, which triggered repeated SIGSEGVs on env-3's relaunches.
+_X11_STALE_AGE_S = 60.0
 
 # How often the main training thread re-runs _cleanup_stale_x11_state.
 # Every Dolphin env crash leaves one orphan at /tmp/.X11-unix/XNN and
-# one /tmp/xvfb-run.XXX; at ~20% crash rate and ~20 env steps/sec across
-# 4 envs, orphans accumulate at ~1/min. 10 min gives us plenty of margin
-# below the ~10-orphan-SIGSEGV threshold observed on Vast.
-_X11_CLEANUP_INTERVAL_S = 600.0
+# one /tmp/xvfb-run.XXX; at ~20% crash rate across 4 envs, orphans can
+# cluster in the first few minutes. 60s sweep catches orphans within
+# a couple minutes of the crash, staying ahead of the ~10-orphan SIGSEGV
+# threshold observed on Vast.
+_X11_CLEANUP_INTERVAL_S = 60.0
 
 
 def _cleanup_stale_x11_state() -> None:
@@ -1314,7 +1319,13 @@ def _train_vector(
     # resets on any successful episode on that env, so 20 only fires
     # when env i cannot complete a single clean rollout 20 times straight.
     MAX_ENV_CRASHES = 20
-    MAX_TRACK_CRASHES = 3
+    # MAX_TRACK_CRASHES: in single-track mode, removing the track aborts
+    # the whole run. We need to tolerate the crash bursts that happen in
+    # the first ~2 minutes before the periodic X11 cleanup clears the
+    # orphans from the previous run. 20 aligns with MAX_ENV_CRASHES: a
+    # track that has 20 crashes without stringing together 3 consecutive
+    # clean episodes is genuinely broken.
+    MAX_TRACK_CRASHES = 20
     CRASH_RESET_AFTER_SUCCESSES = 3
     # Mutable holder so rollout threads can write back their replacement env
     # after a crash without losing main-thread visibility.
@@ -1651,9 +1662,11 @@ def train(
     # of clean episodes splits the difference.
     track_crash_counts: dict[str, int] = {}
     track_success_streaks: dict[str, int] = {}
-    # See _train_vector for the MAX_ENV_CRASHES=20 rationale.
+    # See _train_vector for the MAX_ENV_CRASHES=20 and MAX_TRACK_CRASHES=20
+    # rationales — both relaxed from earlier tight values after
+    # X11-orphan-induced crash clusters killed production runs.
     MAX_ENV_CRASHES = 20
-    MAX_TRACK_CRASHES = 3
+    MAX_TRACK_CRASHES = 20
     CRASH_RESET_AFTER_SUCCESSES = 3
     last_warmup_log_env_steps = 0
     last_x11_cleanup_time = time.time()
