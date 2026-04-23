@@ -72,6 +72,14 @@ def main() -> int:
         help="Override runtime.seed in the YAML.",
     )
     ap.add_argument(
+        "--num-envs",
+        type=int,
+        default=None,
+        help="Override env.num_envs in the YAML. >1 enables multi-env "
+        "parallel rollout; each env_id=0..N-1 uses its own dolphin{i}/ dir "
+        "(run scripts/setup_dolphin_instances.py to clone them first).",
+    )
+    ap.add_argument(
         "--resume",
         type=Path,
         default=None,
@@ -102,6 +110,11 @@ def main() -> int:
         cfg.device = args.device
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.num_envs is not None:
+        if args.num_envs < 1:
+            print(f"error: --num-envs must be >= 1, got {args.num_envs}", file=sys.stderr)
+            return 1
+        cfg.num_envs = args.num_envs
 
     if args.testing:
         logging.getLogger(__name__).info(
