@@ -1202,6 +1202,13 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
 # that a run crashing minutes before this runs still gets cleaned up.
 _X11_STALE_AGE_S = 300.0
 
+# How often the main training thread re-runs _cleanup_stale_x11_state.
+# Every Dolphin env crash leaves one orphan at /tmp/.X11-unix/XNN and
+# one /tmp/xvfb-run.XXX; at ~20% crash rate and ~20 env steps/sec across
+# 4 envs, orphans accumulate at ~1/min. 10 min gives us plenty of margin
+# below the ~10-orphan-SIGSEGV threshold observed on Vast.
+_X11_CLEANUP_INTERVAL_S = 600.0
+
 
 def _cleanup_stale_x11_state() -> None:
     """Wipe leftover Xvfb sockets + xvfb-run work dirs older than
@@ -1299,7 +1306,14 @@ def _train_vector(
     track_crash_counts: dict[str, int] = {}
     track_success_streaks: dict[str, int] = {}
     per_env_crash_streaks: list[int] = [0] * cfg.num_envs
-    MAX_ENV_CRASHES = 5
+    # MAX_ENV_CRASHES is a "N disasters in a row before we give up" bound.
+    # 5 was too tight for multi-hour runs — a cluster of X11-orphan-induced
+    # SIGSEGVs on one env can easily chain 5 deep before the periodic X11
+    # cleanup catches up. 20 gives margin for such clusters while still
+    # bailing on a truly persistently-broken env. The per-env streak
+    # resets on any successful episode on that env, so 20 only fires
+    # when env i cannot complete a single clean rollout 20 times straight.
+    MAX_ENV_CRASHES = 20
     MAX_TRACK_CRASHES = 3
     CRASH_RESET_AFTER_SUCCESSES = 3
     # Mutable holder so rollout threads can write back their replacement env
@@ -1454,6 +1468,7 @@ def _train_vector(
         last_learn_env_steps = 0
         last_warmup_log_env_steps = 0
         last_ckpt_grad_steps = -1
+        last_x11_cleanup_time = time.time()
         log_cadence = cfg.log_every_grad_steps
         try:
             while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
@@ -1517,6 +1532,17 @@ def _train_vector(
                         Path(cfg.log_dir), run_name, cfg.keep_last_n_checkpoints,
                     )
                     last_ckpt_grad_steps = grad_steps_now
+
+                # Periodic X11 cleanup. Each env crash leaves an orphan at
+                # /tmp/.X11-unix/XNN + /tmp/xvfb-run.XXX; over a multi-hour
+                # run with a ~20% crash rate those accumulate past the
+                # ~10-orphan threshold that triggers fresh-Dolphin SIGSEGV.
+                # Run every _X11_CLEANUP_INTERVAL_S; the liveness guard
+                # (_X11_STALE_AGE_S) keeps us from touching live envs'
+                # sockets.
+                if time.time() - last_x11_cleanup_time >= _X11_CLEANUP_INTERVAL_S:
+                    _cleanup_stale_x11_state()
+                    last_x11_cleanup_time = time.time()
 
                 # Avoid spinning when nothing changed.
                 time.sleep(0.01)
@@ -1625,16 +1651,24 @@ def train(
     # of clean episodes splits the difference.
     track_crash_counts: dict[str, int] = {}
     track_success_streaks: dict[str, int] = {}
-    MAX_ENV_CRASHES = 5
+    # See _train_vector for the MAX_ENV_CRASHES=20 rationale.
+    MAX_ENV_CRASHES = 20
     MAX_TRACK_CRASHES = 3
     CRASH_RESET_AFTER_SUCCESSES = 3
     last_warmup_log_env_steps = 0
+    last_x11_cleanup_time = time.time()
     # Flag set when learn_step's NaN-streak abort fires. Used in `finally:` to
     # redirect the save to `_diverged.pt` instead of overwriting the last clean
     # `_final.pt` with poisoned weights (which resume would silently re-load).
     aborted_due_to_divergence = False
     try:
         while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
+            # Periodic X11 cleanup — same rationale as _train_vector.
+            # Single-env loop sweeps at the episode boundary since there's
+            # only one rollout and it respects the 300s liveness guard.
+            if time.time() - last_x11_cleanup_time >= _X11_CLEANUP_INTERVAL_S:
+                _cleanup_stale_x11_state()
+                last_x11_cleanup_time = time.time()
             track_slug = agent.sampler.sample()
 
             try:
