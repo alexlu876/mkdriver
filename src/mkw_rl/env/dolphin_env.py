@@ -312,20 +312,20 @@ class MkwDolphinEnv(gym.Env):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._dolphin_log_fh = open(log_path, "wb")  # noqa: SIM115 — held for lifetime of subprocess
         log.info("[env %d] launching: %s (log → %s)", self.env_id, " ".join(cmd), log_path)
-        # shell=True forces the launch through /bin/sh, which empirically
-        # matters for the Felk Dolphin fork: direct argv-list subprocess
-        # spawn produces Dolphin runs that hang at high CPU without ever
-        # reaching scripting init, while shell-spawn (the same path
-        # probe7.sh uses) reliably starts scripting within 1-2 seconds.
-        # Root cause not fully pinned down — likely Dolphin's reaction to
-        # controlling-tty inheritance or PID namespace differences.
-        import shlex  # noqa: PLC0415
-        shell_cmd = " ".join(shlex.quote(a) for a in cmd)
+        # Argv-list + shell=False + start_new_session=True. The new session
+        # puts Dolphin in its own process-group / session, detaching it from
+        # our controlling TTY and any signal disposition inherited from the
+        # Python parent (uv/pytorch register SIGINT handlers that propagate
+        # into child PGs by default). Both live probes confirm this form
+        # runs scripting correctly; earlier `shell=True` experiments added
+        # a /bin/sh wrapper that didn't help and left the child attached
+        # to whatever PG the parent was in.
         self._process = subprocess.Popen(
-            shell_cmd, env=env, shell=True,
+            cmd, env=env, shell=False,
             stdin=subprocess.DEVNULL,
             stdout=self._dolphin_log_fh,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
 
     def _wait_for_slave(self) -> None:
