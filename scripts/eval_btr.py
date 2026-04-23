@@ -32,10 +32,11 @@ Write metrics to JSON for a return curve::
         --device cuda \\
         --output eval_out/grad20000.json
 
-Running this while training is IN PROGRESS is supported but will share
-the GPU with the trainer — expect both to run slower. Typically you
-checkpoint-evaluate off the most recent ``_grad{N}.pt`` between training
-sessions rather than concurrently.
+Running alongside a live trainer is safe (this script does not touch
+/tmp/.X11-unix state and uses a distinct ``--env-id`` to avoid socket
+port collisions on 26330+env_id). Both processes will share the GPU
+though, so expect both to slow down. Typically you checkpoint-evaluate
+off the most recent ``_grad{N}.pt`` between training sessions.
 """
 
 from __future__ import annotations
@@ -108,7 +109,6 @@ def main() -> int:
         load_checkpoint,
         load_config,
         run_one_episode,
-        _cleanup_stale_x11_state,
         _make_env,
     )
 
@@ -137,7 +137,12 @@ def main() -> int:
     agent.online_net.disable_noise()
     agent.online_net.eval()
 
-    _cleanup_stale_x11_state()  # Linux-only, harmless elsewhere.
+    # NOTE: deliberately NOT calling _cleanup_stale_x11_state() here — eval
+    # often runs alongside a live trainer on the same box, and the cleanup
+    # would delete whatever X sockets the trainer is using. The trainer's
+    # own liveness-aware cleanup runs at its startup; by eval time any
+    # stale artifacts have either been cleaned or are owned by the live
+    # trainer and must be preserved.
     env = _make_env(cfg, env_id=args.env_id)
 
     returns: list[float] = []

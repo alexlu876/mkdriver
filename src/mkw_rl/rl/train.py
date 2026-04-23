@@ -1092,8 +1092,24 @@ def _make_env(cfg: TrainConfig, env_id: int | None = None) -> MkwDolphinEnv:
         if cfg.num_envs > 1:
             # Sibling-dir mode: ``cfg.dolphin_app`` is expected to point at
             # ``dolphin0/``; we resolve to the sibling ``dolphin{env_id}/``
-            # in the same parent dir.
-            parent = Path(cfg.dolphin_app).parent
+            # in the same parent dir. Fail loudly if the config points
+            # somewhere else — silently constructing ``.../dolphin0/dolphin1``
+            # from a macOS default like ``~/code/mkw/Wii-RL/dolphin0/DolphinQt.app``
+            # would look fine at build time and blow up during the first
+            # reset with a hard-to-diagnose path error.
+            app_path = Path(cfg.dolphin_app)
+            if app_path.name != "dolphin0":
+                raise ValueError(
+                    f"cfg.dolphin_app must point at a directory named 'dolphin0' "
+                    f"when cfg.num_envs > 1 (got name={app_path.name!r} from "
+                    f"{cfg.dolphin_app!r}). Multi-env resolves sibling dirs as "
+                    f"{{parent}}/dolphin{{env_id}} and needs the base name to be "
+                    f"'dolphin0' to compute them correctly. Run "
+                    f"scripts/setup_dolphin_instances.py --parent "
+                    f"{app_path.parent.parent} --num-envs {cfg.num_envs} to "
+                    f"create the sibling tree."
+                )
+            parent = app_path.parent
             kwargs["dolphin_app"] = str(parent / f"dolphin{effective_env_id}")
         else:
             kwargs["dolphin_app"] = cfg.dolphin_app
@@ -1180,8 +1196,16 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
 # ---------------------------------------------------------------------------
 
 
+# Minimum age (seconds) for an X11/xvfb artifact to be considered "stale".
+# Anything younger than this is assumed to belong to a live xvfb-run — we
+# leave it alone. 5 min is well past Dolphin boot (~2s) but tight enough
+# that a run crashing minutes before this runs still gets cleaned up.
+_X11_STALE_AGE_S = 300.0
+
+
 def _cleanup_stale_x11_state() -> None:
-    """Wipe leftover Xvfb sockets + xvfb-run work dirs in /tmp.
+    """Wipe leftover Xvfb sockets + xvfb-run work dirs older than
+    ``_X11_STALE_AGE_S`` in /tmp.
 
     Each Dolphin launch picks a fresh X display via ``xvfb-run -a``. When a
     run crashes (common during dev, and inevitable over a multi-hour prod
@@ -1192,17 +1216,31 @@ def _cleanup_stale_x11_state() -> None:
     silently during the first ``reset()`` — crashing every subsequent
     relaunch until the orphans are cleaned.
 
-    Scope is ``/tmp`` globs only; we don't touch X sockets owned by live
-    processes since the pattern matches only numeric display sockets that
-    Xvfb creates. Intended to run once at ``train()`` start on Linux; no-op
-    elsewhere.
+    Liveness protection: we only touch artifacts whose mtime is older than
+    ``_X11_STALE_AGE_S`` seconds. Anything newer probably belongs to a live
+    process (a concurrent ``train()`` invocation, a live ``eval_btr.py``
+    rollout, the user's own Xvfb session on a shared dev box). Without
+    this guard, running eval alongside a live trainer would nuke the
+    trainer's X socket and SIGSEGV all its envs.
+
+    Linux-only; no-op elsewhere so macOS dev machines aren't affected.
     """
     if platform.system() != "Linux":
         return
     import glob  # noqa: PLC0415
+    now = time.time()
     removed = 0
+    skipped_live = 0
     for pattern in ("/tmp/.X11-unix/X*", "/tmp/.X*-lock", "/tmp/xvfb-run.*"):
         for p in glob.glob(pattern):
+            try:
+                age = now - os.path.getmtime(p)
+            except OSError:
+                # File disappeared between glob and stat — nothing to do.
+                continue
+            if age < _X11_STALE_AGE_S:
+                skipped_live += 1
+                continue
             try:
                 if os.path.isdir(p):
                     import shutil  # noqa: PLC0415
@@ -1211,10 +1249,13 @@ def _cleanup_stale_x11_state() -> None:
                     os.unlink(p)
                 removed += 1
             except OSError:
-                # Another process holds it / permission denied / already gone.
+                # Permission denied / already gone.
                 pass
-    if removed:
-        log.info("cleaned up %d stale X11/xvfb-run artifacts in /tmp", removed)
+    if removed or skipped_live:
+        log.info(
+            "X11/xvfb cleanup: removed %d stale, skipped %d live (age<%.0fs)",
+            removed, skipped_live, _X11_STALE_AGE_S,
+        )
 
 
 def _train_vector(
@@ -1246,16 +1287,21 @@ def _train_vector(
     shutdown_flag, restore_sigterm = _install_shutdown_handler()
     # Guards crash-counter dict updates from multiple rollout threads.
     crash_lock = threading.Lock()
-    # track_crash_counts is CONSECUTIVE crashes per track — reset to 0 on any
-    # successful episode on that track. A monotonic total (the original
-    # semantics) makes long single-track runs unkillable because even a
-    # healthy 2% crash rate hits the threshold after ~150 episodes. We
-    # only want to drop a track when it's CURRENTLY failing, not because
-    # of failures hours ago that were recovered from.
+    # Crash-counter semantics: an entry in ``track_crash_counts`` increments
+    # on each env crash and only clears after ``CRASH_RESET_AFTER_SUCCESSES``
+    # consecutive CLEAN episodes on that track. A purely monotonic counter
+    # (old behavior) made long runs unkillable even at healthy 2% crash
+    # rate; resetting on every success (interim fix) meant a 50% flaky
+    # track ping-pongs forever because every alternate success wipes the
+    # counter back to 0. Requiring a streak of successes strikes a middle
+    # ground: truly broken tracks still hit the threshold; tracks with
+    # transient flakes recover.
     track_crash_counts: dict[str, int] = {}
+    track_success_streaks: dict[str, int] = {}
     per_env_crash_streaks: list[int] = [0] * cfg.num_envs
     MAX_ENV_CRASHES = 5
     MAX_TRACK_CRASHES = 3
+    CRASH_RESET_AFTER_SUCCESSES = 3
     # Mutable holder so rollout threads can write back their replacement env
     # after a crash without losing main-thread visibility.
     env_slots: list[MkwDolphinEnv] = list(envs)
@@ -1284,9 +1330,13 @@ def _train_vector(
                 )
                 with crash_lock:
                     per_env_crash_streaks[i] = 0
-                    # Track recovered — clear its crash counter so past flakes
-                    # don't accumulate toward MAX_TRACK_CRASHES.
-                    track_crash_counts.pop(track_slug, None)
+                    # Bump success streak; clear crash counter only after
+                    # CRASH_RESET_AFTER_SUCCESSES clean episodes in a row.
+                    track_success_streaks[track_slug] = (
+                        track_success_streaks.get(track_slug, 0) + 1
+                    )
+                    if track_success_streaks[track_slug] >= CRASH_RESET_AFTER_SUCCESSES:
+                        track_crash_counts.pop(track_slug, None)
             except RuntimeError as exc:
                 if "consecutive non-finite" in str(exc):
                     # NaN abort from learn_step (though learn_step shouldn't
@@ -1308,6 +1358,8 @@ def _train_vector(
                 with crash_lock:
                     per_env_crash_streaks[i] += 1
                     track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
+                    # Crash breaks the success streak — no partial credit.
+                    track_success_streaks[track_slug] = 0
                     env_streak = per_env_crash_streaks[i]
                     track_streak = track_crash_counts[track_slug]
                 log.error(
@@ -1408,6 +1460,14 @@ def _train_vector(
                     if delta > 0:
                         with agent_lock:
                             for _ in range(delta * cfg.replay_ratio):
+                                # Respect shutdown mid-batch. Without this, a
+                                # NaN-triggered shutdown (or user SIGTERM) can
+                                # grind through hundreds more learn_step()
+                                # calls on poisoned weights before the outer
+                                # loop's shutdown check fires, stomping the
+                                # _diverged.pt save with even worse state.
+                                if shutdown_flag["shutdown"]:
+                                    break
                                 learn_metrics = agent.learn_step()
                                 if (
                                     learn_metrics
@@ -1550,9 +1610,15 @@ def train(
     shutdown_flag, restore_sigterm = _install_shutdown_handler()
     episode_idx = 0
     env_crash_streak = 0
+    # Crash-counter semantics: see _train_vector for the rationale. Short
+    # version: monotonic killed long runs over transient flakes; reset-on-
+    # any-success let 50% flaky tracks ping-pong forever; reset on a STREAK
+    # of clean episodes splits the difference.
     track_crash_counts: dict[str, int] = {}
+    track_success_streaks: dict[str, int] = {}
     MAX_ENV_CRASHES = 5
     MAX_TRACK_CRASHES = 3
+    CRASH_RESET_AFTER_SUCCESSES = 3
     last_warmup_log_env_steps = 0
     # Flag set when learn_step's NaN-streak abort fires. Used in `finally:` to
     # redirect the save to `_diverged.pt` instead of overwriting the last clean
@@ -1568,9 +1634,13 @@ def train(
                     logger=logger, shutdown_flag=shutdown_flag,
                 )
                 env_crash_streak = 0
-                # Track recovered — clear its crash count so past flakes
-                # don't accumulate toward MAX_TRACK_CRASHES over a long run.
-                track_crash_counts.pop(track_slug, None)
+                # Bump success streak; clear crash counter only after
+                # CRASH_RESET_AFTER_SUCCESSES clean episodes in a row.
+                track_success_streaks[track_slug] = (
+                    track_success_streaks.get(track_slug, 0) + 1
+                )
+                if track_success_streaks[track_slug] >= CRASH_RESET_AFTER_SUCCESSES:
+                    track_crash_counts.pop(track_slug, None)
             except RuntimeError as exc:
                 # NaN-abort path from learn_step — propagate but flag so the
                 # finally: block saves to _diverged.pt, preserving a forensic
@@ -1593,6 +1663,8 @@ def train(
             ) as exc:
                 env_crash_streak += 1
                 track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
+                # Crash breaks the success streak — no partial credit.
+                track_success_streaks[track_slug] = 0
                 log.error(
                     "env crashed mid-episode on %s (%s: %r); env_streak=%d/%d track_streak=%d/%d — relaunching",
                     track_slug, type(exc).__name__, str(exc),

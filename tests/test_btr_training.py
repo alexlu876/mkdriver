@@ -1104,6 +1104,50 @@ class TestMultiEnv:
         with pytest.raises(ValueError, match="num_envs > 1"):
             train(cfg, env=stub_env)
 
+    def test_make_env_rejects_wrong_dolphin_app_name_when_multi(self, tmp_path: Path) -> None:
+        """With num_envs>1, cfg.dolphin_app must end in 'dolphin0' because
+        _make_env derives sibling dolphin{i}/ dirs from Path(...).parent.
+        A macOS default like '.../dolphin0/DolphinQt.app' would produce
+        nonsense paths; this assert makes the failure loud at build time
+        rather than deep in a Dolphin spawn."""
+        from mkw_rl.rl.train import _make_env
+
+        cfg = _tiny_cfg(
+            tmp_path,
+            num_envs=2,
+            dolphin_app="/some/prefix/dolphin0/DolphinQt.app",  # misconfig
+        )
+        with pytest.raises(ValueError, match="must point at a directory named 'dolphin0'"):
+            _make_env(cfg, env_id=1)
+
+    def test_make_env_accepts_dolphin0_path_when_multi(self, tmp_path: Path) -> None:
+        """Correct shape: dolphin_app = '.../dolphin0' → sibling '.../dolphin1'."""
+        from mkw_rl.rl.train import _make_env
+        from mkw_rl.env.dolphin_env import MkwDolphinEnv
+
+        # Patch MkwDolphinEnv to a lightweight stub so we can assert on the
+        # dolphin_app kwarg without actually trying to launch Dolphin.
+        captured_kwargs: dict = {}
+
+        class _StubEnv:
+            def __init__(self, **kwargs: object) -> None:
+                captured_kwargs.update(kwargs)
+
+        import mkw_rl.rl.train as train_mod
+        original = train_mod.MkwDolphinEnv
+        train_mod.MkwDolphinEnv = _StubEnv  # type: ignore[assignment,misc]
+        try:
+            cfg = _tiny_cfg(
+                tmp_path,
+                num_envs=4,
+                dolphin_app="/opt/wii-rl/dolphin0",
+            )
+            _make_env(cfg, env_id=2)
+        finally:
+            train_mod.MkwDolphinEnv = original
+        assert captured_kwargs["dolphin_app"] == "/opt/wii-rl/dolphin2"
+        assert captured_kwargs["env_id"] == 2
+
 
 class TestDeterministicAct:
     """Coverage for ``agent.act(deterministic=True)`` — the noisy-nets
@@ -1295,6 +1339,17 @@ class TestCleanupStaleX11State:
     Dolphin-SIGSEGV-after-10-orphans issue. Without this, the function
     could silently break on a future refactor of the glob patterns."""
 
+    @staticmethod
+    def _age_paths(paths: list[Path], age_seconds: float) -> None:
+        """Backdate mtime on a set of paths so the liveness guard considers
+        them stale. Needed because the helper's liveness threshold is 300s;
+        fresh fixtures are treated as live unless aged explicitly."""
+        import os as _os
+        import time as _time
+        target = _time.time() - age_seconds
+        for p in paths:
+            _os.utime(p, (target, target))
+
     def test_removes_x11_sockets_and_lock_and_xvfb_dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         import platform as _platform
 
@@ -1313,6 +1368,21 @@ class TestCleanupStaleX11State:
         # Decoy files that should NOT be touched.
         (fake_tmp / "unrelated.txt").write_bytes(b"keep me")
         (fake_tmp / ".X11-unix" / "README").write_bytes(b"not a socket")
+
+        # Age all the X11/xvfb fixtures past the liveness threshold (300s)
+        # so the liveness guard classifies them as stale. If we don't age
+        # them, the newly-created test files are "live" and the guard
+        # correctly skips them (see test_preserves_live_artifacts).
+        self._age_paths(
+            [
+                fake_tmp / ".X11-unix" / "X142",
+                fake_tmp / ".X11-unix" / "X148",
+                fake_tmp / ".X148-lock",
+                fake_tmp / "xvfb-run.abc123",
+                fake_tmp / "xvfb-run.xyz789",
+            ],
+            age_seconds=600,
+        )
 
         import mkw_rl.rl.train as train_mod
         original_glob = __import__("glob").glob
@@ -1363,6 +1433,49 @@ class TestCleanupStaleX11State:
         monkeypatch.setattr("glob.glob", spy)
         _cleanup_stale_x11_state()
         assert call_count[0] == 0, "helper should no-op on non-Linux"
+
+    def test_preserves_live_artifacts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Artifacts with mtime younger than _X11_STALE_AGE_S (= 300s) must
+        be PRESERVED. Without this guard, running eval_btr or a second
+        train() instance on a shared box would nuke the X sockets of the
+        live job and SIGSEGV all its envs."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import _cleanup_stale_x11_state
+
+        fake_tmp = tmp_path / "tmp"
+        (fake_tmp / ".X11-unix").mkdir(parents=True)
+        # Fresh (just-created) artifacts — their mtimes are 'now'.
+        live_socket = fake_tmp / ".X11-unix" / "X300"
+        live_socket.write_bytes(b"")
+        live_lock = fake_tmp / ".X300-lock"
+        live_lock.write_bytes(b"99999\n")
+        live_dir = fake_tmp / "xvfb-run.liveABCD"
+        live_dir.mkdir()
+
+        # An aged artifact that SHOULD be removed, to prove the function
+        # is doing something rather than no-op'ing entirely.
+        stale_socket = fake_tmp / ".X11-unix" / "X100"
+        stale_socket.write_bytes(b"")
+        self._age_paths([stale_socket], age_seconds=600)
+
+        original_glob = __import__("glob").glob
+
+        def patched_glob(pattern: str) -> list[str]:
+            if pattern.startswith("/tmp/"):
+                pattern = str(fake_tmp / pattern[len("/tmp/"):])
+            return original_glob(pattern)
+
+        monkeypatch.setattr(train_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr("glob.glob", patched_glob)
+
+        _cleanup_stale_x11_state()
+
+        # Live-age artifacts preserved.
+        assert live_socket.exists(), "fresh X socket should not be deleted"
+        assert live_lock.exists(), "fresh lock file should not be deleted"
+        assert live_dir.exists(), "fresh xvfb-run dir should not be deleted"
+        # Stale one removed (proves function executed and is working).
+        assert not stale_socket.exists(), "600s-old stale X socket should be removed"
 
 
 class TestCheckpointRotation:
