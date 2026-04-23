@@ -426,19 +426,34 @@ class MkwDolphinEnv(gym.Env):
         # if anything went wrong on the slave side. A hung slave (Dolphin froze
         # mid-load) surfaces as TimeoutError via _recv_with_timeout; EOFError
         # means the slave process exited.
+        #
+        # Both EOFError (Dolphin crashed) and slave-side reset_err are
+        # RECOVERABLE conditions — the rollout worker should relaunch the env
+        # and retry, not abort the whole run. Preserve the original exception
+        # class (EOFError) rather than wrapping in RuntimeError, because the
+        # train-loop except list discriminates on type: RuntimeError is
+        # treated as fatal ('probably NaN-divergence or programmer bug'),
+        # EOFError as recoverable. Wrapping in RuntimeError meant one
+        # transient Dolphin crash at a bad moment killed the run.
         try:
             msg = self._recv_with_timeout(RESET_TIMEOUT_S, f"reset(track_slug={track_slug!r})")
         except EOFError as exc:
-            raise RuntimeError(
+            # Re-raise EOFError (with a clearer message via chaining) so the
+            # rollout worker's recoverable-exception branch catches it.
+            raise EOFError(
                 f"slave closed connection during reset (track_slug={track_slug!r}) — "
-                "Dolphin likely crashed; check its log"
+                "Dolphin crashed; check its log"
             ) from exc
         if isinstance(msg, tuple) and msg[0] == "reset_err":
-            raise RuntimeError(
+            # Slave-side reset failure is a per-track issue (corrupt savestate,
+            # bad metadata, etc.), not a run-level abort. Raise via the narrow
+            # class used elsewhere for this case.
+            raise FileNotFoundError(
                 f"slave failed to reset (track_slug={track_slug!r}): {msg[1]}\n"
                 f"slave traceback:\n{msg[2]}"
             )
         if not (isinstance(msg, tuple) and msg[0] == "reset_ok"):
+            # Protocol violation — this IS a programming error, keep as RuntimeError.
             raise RuntimeError(f"unexpected reset reply from slave: {msg!r}")
 
         # Reset succeeded — commit the new slug.
