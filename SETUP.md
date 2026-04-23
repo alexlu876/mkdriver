@@ -110,11 +110,13 @@ The pipeline also runs on Linux CUDA hosts (Vast.ai). The env module auto-detect
    export LD_LIBRARY_PATH=$PWD/.venv/lib/python3.13/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH
    ```
 
-8. Launch:
+8. Launch — **invoke the venv python directly, not via `uv run`**:
 
    ```bash
-   WANDB_API_KEY=… uv run python scripts/train_btr.py --config configs/btr.yaml --device cuda
+   WANDB_API_KEY=… .venv/bin/python scripts/train_btr.py --config configs/btr.yaml --device cuda
    ```
+
+   Running through `uv run` on Vast.ai silently prevents Dolphin's embedded scripting engine from initializing — the emulator boots fine and burns ~700% CPU running the game, but the Python slave never executes, so the master socket never sees a connection and training stalls at the header row. Direct `.venv/bin/python` launches produce identical results to `uv run` for all other code but fix scripting. Reason not fully nailed down (likely `uv run`'s env/fd manipulation interacting with Dolphin's embedded CPython init via `subprocess.Popen`); bypassing `uv run` is the only reliable workaround found.
 
    Dolphin's stdout/stderr is captured to `{log_dir}/dolphin_env_0.log` for post-mortem diagnosis. Checkpoints land in `{log_dir}/{run_name}_grad{N}.pt` with rotation keeping the newest 5; `_final.pt` / `_diverged.pt` are never pruned. Resume with `--resume {path} [--run-name {name}]`.
 
