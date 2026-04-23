@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import signal
 import subprocess
 import tempfile
 from dataclasses import asdict
@@ -472,11 +473,24 @@ class MkwDolphinEnv(gym.Env):
                 pass
             self._conn = None
         if self._process is not None:
+            # We launched with start_new_session=True, which makes the spawned
+            # process a new session leader. xvfb-run then forks Xvfb + execs
+            # dolphin-emu as children in that session. terminate() on
+            # self._process only signals the top shell and Dolphin survives
+            # as an orphan (observed: ~1.4 GB leaked per teardown). Signal
+            # the whole process group instead.
             try:
-                self._process.terminate()
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
+                pgid = os.getpgid(self._process.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                try:
+                    self._process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(pgid, signal.SIGKILL)
+                    self._process.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                # Process already dead, or KILL also timed out — either way,
+                # move on. subprocess.Popen.__del__ will reap on GC.
+                pass
             self._process = None
         if self._dolphin_log_fh is not None:
             try:
