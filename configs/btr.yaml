@@ -10,9 +10,16 @@ data:
 
 env:
   env_id: 0                                  # socket port offset (26330 + env_id)
+  # Parallel Dolphin instances. 1 = legacy single-env path. >1 enables the
+  # multi-env rollout; each env_id=0..num_envs-1 gets its own dolphin{i}/
+  # binary directory (run scripts/setup_dolphin_instances.py to clone them
+  # from dolphin0/ once). VIPTankz uses 4 on a 32-core box.
+  num_envs: 1
   # Optional — override MkwDolphinEnv's dev-machine defaults. REQUIRED on any
   # host where Dolphin or the ISO don't live at the author's local paths
   # (e.g., Vast.ai). Leave commented out to use the dev-machine defaults.
+  # With num_envs > 1, dolphin_app must point at the PARENT directory (which
+  # contains dolphin0/, dolphin1/, ...), not a specific dolphin{i}/.
   # dolphin_app: "/opt/dolphin/DolphinQt.app"
   # iso: "/opt/mkw/mkw.iso"
   # mkw_rl_src: "/workspace/mkwii/src"

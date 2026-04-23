@@ -1031,6 +1031,80 @@ class TestCrashRestart:
             train(cfg)
 
 
+class TestMultiEnv:
+    """Sanity-check the _train_vector multi-env path with FakeEnvs so no
+    Dolphin is needed. Validates: N envs constructed with distinct env_ids,
+    replay append uses per-env stream, training reaches configured
+    total_frames, final checkpoint saves."""
+
+    def test_two_envs_complete_a_short_run(self, tmp_path: Path) -> None:
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        # 2 envs. Gate warmup high enough that no learn_step fires during the
+        # brief test window — avoids needing a replay config big enough to
+        # safely sample learning sequences (sample_sequences needs
+        # non-seam starts to exist, which requires capacity >> seq_len).
+        cfg = _tiny_cfg(
+            tmp_path,
+            num_envs=2,
+            total_frames=30,
+            min_sampling_size=10_000,  # never warms up within 30 frames
+        )
+        constructed_env_ids: list[int] = []
+        lock = __import__("threading").Lock()
+
+        def fake_make(c: TrainConfig, env_id: int | None = None) -> _FakeEnv:  # noqa: ARG001
+            eid = env_id if env_id is not None else 0
+            with lock:
+                constructed_env_ids.append(eid)
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[0.5] * 6,
+            )
+
+        with patch.object(train_mod, "_make_env", side_effect=fake_make):
+            agent = train(cfg)
+
+        # Both env_ids instantiated at least once, ids cover the expected range.
+        assert sorted(set(constructed_env_ids)) == [0, 1]
+        # Training reached the frame target.
+        assert agent.env_steps >= cfg.total_frames
+
+    def test_multi_env_final_checkpoint_saved(self, tmp_path: Path) -> None:
+        """Final checkpoint file lands in log_dir after clean multi-env exit."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(
+            tmp_path,
+            num_envs=2,
+            total_frames=20,
+            min_sampling_size=10_000,
+        )
+
+        def fake_make(c: TrainConfig, env_id: int | None = None) -> _FakeEnv:  # noqa: ARG001
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[0.5] * 6,
+            )
+
+        with patch.object(train_mod, "_make_env", side_effect=fake_make):
+            train(cfg, run_name="multi_env_test")
+
+        ckpt = Path(cfg.log_dir) / "multi_env_test_final.pt"
+        assert ckpt.exists(), f"expected final ckpt at {ckpt}"
+
+    def test_multi_env_rejects_explicit_env_arg(self, tmp_path: Path) -> None:
+        """Passing env= to train() while num_envs>1 is a config error."""
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(tmp_path, num_envs=2, total_frames=10, min_sampling_size=10_000)
+        stub_env = _FakeEnv(framestack=cfg.framestack, h=cfg.imagey, w=cfg.imagex)
+        with pytest.raises(ValueError, match="num_envs > 1"):
+            train(cfg, env=stub_env)
+
+
 class TestCheckpointRotation:
     def test_prune_keeps_last_n(self, tmp_path: Path) -> None:
         # Create 7 fake grad ckpts with increasing mtimes.

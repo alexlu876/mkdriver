@@ -46,6 +46,7 @@ import os
 import random
 import re
 import signal
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,9 +83,17 @@ class TrainConfig:
 
     # env
     env_id: int = 0
+    # Number of parallel Dolphin instances. 1 keeps the legacy single-env path.
+    # >1 enables the multi-env rollout: each instance runs in its own thread,
+    # appends to the shared replay via stream=env_id, and uses its own Dolphin
+    # binary directory (must be pre-created — see scripts/setup_dolphin_instances.py).
+    # Socket ports are BASE_PORT + env_id so they don't collide.
+    num_envs: int = 1
     # Optional — override MkwDolphinEnv's dev-machine defaults. Required for
     # any host where Dolphin / the ISO don't live at the author's local paths
     # (e.g., Vast.ai). Leave as None to use MkwDolphinEnv's defaults.
+    # With num_envs > 1, dolphin_app must point at the PARENT directory that
+    # contains dolphin0/, dolphin1/, ... (not a specific dolphin{i}/).
     dolphin_app: str | None = None
     iso: str | None = None
     mkw_rl_src: str | None = None
@@ -185,7 +194,7 @@ def load_config(path: str | Path, testing: bool = False) -> TrainConfig:
         if src in raw.get("data", {}):
             kw[dst] = raw["data"][src]
     if "env" in raw:
-        for k in ("env_id", "dolphin_app", "iso", "mkw_rl_src"):
+        for k in ("env_id", "num_envs", "dolphin_app", "iso", "mkw_rl_src"):
             if k in raw["env"]:
                 kw[k] = raw["env"][k]
     if "model" in raw:
@@ -621,7 +630,7 @@ class BTRAgent:
             size=cfg.replay_size,
             device=device,
             n=cfg.n_step,
-            envs=1,
+            envs=cfg.num_envs,
             gamma=cfg.gamma,
             alpha=cfg.per_alpha,
             beta=cfg.per_beta,
@@ -845,6 +854,9 @@ def run_one_episode(
     track_slug: str,
     logger: Logger | None = None,
     shutdown_flag: dict[str, bool] | None = None,
+    stream: int = 0,
+    agent_lock: "threading.Lock | None" = None,
+    skip_learn: bool = False,
 ) -> tuple[float, dict[str, float], int]:
     """Run a single episode. Transitions are appended to replay; one learn
     step per env step (replay_ratio=1) fires when replay is warmed up.
@@ -853,6 +865,16 @@ def run_one_episode(
     ``cfg.log_every_grad_steps`` grad steps (mid-episode, not just at
     episode end). ``shutdown_flag["shutdown"]`` is checked after each step
     for graceful termination.
+
+    Multi-env plumbing:
+    - ``stream`` is the replay-buffer stream ID = env_id. For single-env runs
+      (legacy path) stream=0 matches the old hardcoded value.
+    - ``agent_lock``, if provided, serializes all agent state mutations
+      (``act``, ``learn_step``, ``replay.append``, env_steps increment). Set
+      this in multi-env runs where N rollout threads share one agent.
+    - ``skip_learn``: in multi-env runs the rollout threads only collect
+      transitions; the main thread owns the learn-step cadence. Setting this
+      to True makes the function pure rollout.
 
     Returns (episode_return, reward_component_sums, n_steps).
     """
@@ -879,24 +901,31 @@ def run_one_episode(
     step = 0
     log_cadence = agent.cfg.log_every_grad_steps
 
+    # Dummy context manager so the main loop stays readable whether or not
+    # a lock is passed (single-env: nullcontext; multi-env: real Lock).
+    import contextlib  # noqa: PLC0415
+    lock = agent_lock if agent_lock is not None else contextlib.nullcontext()
+
     while True:
         # To tensor for action selection: (1, 1, stack, H, W).
         obs_t = torch.from_numpy(obs).unsqueeze(0).unsqueeze(0)
-        action, hidden = agent.act(obs_t, hidden)
+        with lock:
+            action, hidden = agent.act(obs_t, hidden)
 
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        agent.replay.append(
-            state=prev_obs,
-            action=action,
-            reward=reward,
-            n_state=next_obs,
-            done=bool(terminated),
-            trun=bool(truncated),
-            stream=0,
-        )
-        agent.env_steps += 1
+        with lock:
+            agent.replay.append(
+                state=prev_obs,
+                action=action,
+                reward=reward,
+                n_state=next_obs,
+                done=bool(terminated),
+                trun=bool(truncated),
+                stream=stream,
+            )
+            agent.env_steps += 1
         episode_return += reward
 
         rb = info.get("reward_breakdown", {})
@@ -905,18 +934,21 @@ def run_one_episode(
 
         # Learn step (once per env step at replay_ratio=1). Emit learn metrics
         # at configured grad-step cadence so mid-training loss spikes are
-        # visible without waiting for the episode boundary.
-        for _ in range(agent.cfg.replay_ratio):
-            learn_metrics = agent.learn_step()
-            if (
-                logger is not None
-                and learn_metrics
-                and log_cadence > 0
-                and agent.grad_steps > 0
-                and agent.grad_steps % log_cadence == 0
-            ):
-                learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
-                logger.log(learn_log, step=agent.env_steps)
+        # visible without waiting for the episode boundary. In multi-env
+        # runs we skip this — the main thread drives learning on its own
+        # cadence synced to total env_steps across all envs.
+        if not skip_learn:
+            for _ in range(agent.cfg.replay_ratio):
+                learn_metrics = agent.learn_step()
+                if (
+                    logger is not None
+                    and learn_metrics
+                    and log_cadence > 0
+                    and agent.grad_steps > 0
+                    and agent.grad_steps % log_cadence == 0
+                ):
+                    learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
+                    logger.log(learn_log, step=agent.env_steps)
 
         prev_obs = next_obs.copy()
         obs = next_obs
@@ -1021,8 +1053,8 @@ class EnvResetFailed(Exception):  # noqa: N818 — keeps legacy callers' match s
     """
 
 
-def _make_env(cfg: TrainConfig) -> MkwDolphinEnv:
-    """Construct an ``MkwDolphinEnv`` from a ``TrainConfig``.
+def _make_env(cfg: TrainConfig, env_id: int | None = None) -> MkwDolphinEnv:
+    """Construct a single ``MkwDolphinEnv`` from a ``TrainConfig``.
 
     Uses whatever optional paths the config carries (``dolphin_app``, ``iso``,
     ``mkw_rl_src``) and falls through to ``MkwDolphinEnv`` defaults for the
@@ -1030,20 +1062,42 @@ def _make_env(cfg: TrainConfig) -> MkwDolphinEnv:
     path stay in sync — a silent divergence here produces the exact
     "restart-clobbers-custom-paths" bug. Also plumbs ``log_dir`` so the env
     writes Dolphin's stdout/stderr next to our CSV/ckpt outputs.
+
+    ``env_id`` overrides ``cfg.env_id`` when constructing one env in a
+    multi-env setup. With num_envs > 1, ``cfg.dolphin_app`` must point at the
+    PARENT directory (which contains dolphin0/, dolphin1/, ...) and this
+    function appends ``dolphin{env_id}`` to pick the right per-env binary.
     """
+    effective_env_id = env_id if env_id is not None else cfg.env_id
     kwargs: dict[str, Any] = {
-        "env_id": cfg.env_id,
+        "env_id": effective_env_id,
         "savestate_dir": cfg.savestate_dir,
         "track_metadata_path": cfg.track_metadata_path,
         "log_dir": cfg.log_dir,
     }
     if cfg.dolphin_app is not None:
-        kwargs["dolphin_app"] = cfg.dolphin_app
+        if cfg.num_envs > 1:
+            # Parent-dir mode: pick the per-env Dolphin install.
+            kwargs["dolphin_app"] = str(Path(cfg.dolphin_app) / f"dolphin{effective_env_id}")
+        else:
+            kwargs["dolphin_app"] = cfg.dolphin_app
     if cfg.iso is not None:
         kwargs["iso"] = cfg.iso
     if cfg.mkw_rl_src is not None:
         kwargs["mkw_rl_src"] = cfg.mkw_rl_src
     return MkwDolphinEnv(**kwargs)
+
+
+def _make_envs(cfg: TrainConfig) -> list[MkwDolphinEnv]:
+    """Construct num_envs parallel ``MkwDolphinEnv`` instances.
+
+    num_envs=1 returns a single-element list — callers that want the legacy
+    single-env path can unwrap with ``envs[0]``. num_envs>1 returns N envs
+    with env_id=0..N-1, each pointing at its own dolphin{i}/ binary dir.
+    """
+    if cfg.num_envs < 1:
+        raise ValueError(f"num_envs must be >= 1, got {cfg.num_envs}")
+    return [_make_env(cfg, env_id=i) for i in range(cfg.num_envs)]
 
 
 def _infer_run_name_from_ckpt(path: Path | str) -> str:
@@ -1105,6 +1159,267 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
     return flag, restore
 
 
+# ---------------------------------------------------------------------------
+# Multi-env training path.
+# ---------------------------------------------------------------------------
+
+
+def _train_vector(
+    cfg: TrainConfig,
+    agent: "BTRAgent",
+    logger: Logger,
+    run_name: str,
+) -> "BTRAgent":
+    """Multi-env training loop.
+
+    Spawns ``cfg.num_envs`` rollout threads, each driving one ``MkwDolphinEnv``
+    on its own episode loop. The main thread drives the learn-step cadence
+    (1 per total env step at ``replay_ratio=1``, matching single-env
+    semantics), periodic checkpointing, and warmup-progress logging. An
+    ``agent_lock`` serializes every mutation of shared agent state
+    (``act``, ``learn_step``, ``replay.append``, ``env_steps``).
+
+    Crash handling is per-thread: each rollout thread catches its own env
+    errors, rebuilds its env, and retries; persistent per-track failures
+    remove the slug from the shared sampler. A global crash limit fires if
+    ANY thread hits MAX_ENV_CRASHES in a row, aborting the whole run.
+
+    Signals a clean exit by setting ``shutdown_flag["shutdown"]`` — rollout
+    threads check this between steps via the shared flag passed through to
+    ``run_one_episode``.
+    """
+    envs = _make_envs(cfg)
+    agent_lock = threading.Lock()
+    shutdown_flag, restore_sigterm = _install_shutdown_handler()
+    # Guards crash-counter dict updates from multiple rollout threads.
+    crash_lock = threading.Lock()
+    track_crash_counts: dict[str, int] = {}
+    per_env_crash_streaks: list[int] = [0] * cfg.num_envs
+    MAX_ENV_CRASHES = 5
+    MAX_TRACK_CRASHES = 3
+    # Mutable holder so rollout threads can write back their replacement env
+    # after a crash without losing main-thread visibility.
+    env_slots: list[MkwDolphinEnv] = list(envs)
+
+    episode_idx_lock = threading.Lock()
+    episode_idx = [0]  # boxed for mutation from threads
+
+    aborted_due_to_divergence = False
+    aborted_with_error: BaseException | None = None
+
+    def _rollout_worker(i: int) -> None:
+        nonlocal aborted_with_error
+        while not shutdown_flag["shutdown"]:
+            try:
+                track_slug = agent.sampler.sample()
+            except Exception as exc:  # noqa: BLE001 — propagate via main thread
+                shutdown_flag["shutdown"] = True
+                aborted_with_error = exc
+                return
+
+            try:
+                ep_return, rb_sums, n_steps = run_one_episode(
+                    agent, env_slots[i], track_slug,
+                    logger=logger, shutdown_flag=shutdown_flag,
+                    stream=i, agent_lock=agent_lock, skip_learn=True,
+                )
+                with crash_lock:
+                    per_env_crash_streaks[i] = 0
+            except RuntimeError as exc:
+                if "consecutive non-finite" in str(exc):
+                    # NaN abort from learn_step (though learn_step shouldn't
+                    # fire here with skip_learn=True; defensive).
+                    shutdown_flag["shutdown"] = True
+                    aborted_with_error = exc
+                    return
+                shutdown_flag["shutdown"] = True
+                aborted_with_error = exc
+                return
+            except (
+                EOFError,
+                BrokenPipeError,
+                ConnectionResetError,
+                OSError,
+                TimeoutError,
+                EnvResetFailed,
+            ) as exc:
+                with crash_lock:
+                    per_env_crash_streaks[i] += 1
+                    track_crash_counts[track_slug] = track_crash_counts.get(track_slug, 0) + 1
+                    env_streak = per_env_crash_streaks[i]
+                    track_streak = track_crash_counts[track_slug]
+                log.error(
+                    "[env %d] crashed on %s (%s); env_streak=%d/%d track_streak=%d/%d — relaunching",
+                    i, track_slug, exc,
+                    env_streak, MAX_ENV_CRASHES,
+                    track_streak, MAX_TRACK_CRASHES,
+                )
+                if env_streak >= MAX_ENV_CRASHES:
+                    shutdown_flag["shutdown"] = True
+                    aborted_with_error = RuntimeError(
+                        f"[env {i}] {MAX_ENV_CRASHES} consecutive crashes; aborting"
+                    )
+                    return
+                if track_streak >= MAX_TRACK_CRASHES:
+                    try:
+                        with agent_lock:
+                            agent.sampler.remove_track(track_slug)
+                        log.warning(
+                            "track %s crashed %d times across envs; removed from sampler",
+                            track_slug, track_streak,
+                        )
+                    except (KeyError, RuntimeError):
+                        pass
+                try:
+                    env_slots[i].close()
+                except Exception:  # noqa: BLE001
+                    pass
+                env_slots[i] = _make_env(cfg, env_id=i)
+                continue
+
+            with agent_lock:
+                agent.sampler.update(track_slug, ep_return)
+            with episode_idx_lock:
+                episode_idx[0] += 1
+                ep_num = episode_idx[0]
+
+            log.info(
+                "ep=%d[env=%d] track=%s return=%.2f len=%d env_steps=%d grad_steps=%d",
+                ep_num, i, track_slug, ep_return, n_steps,
+                agent.env_steps, agent.grad_steps,
+            )
+
+            # Per-episode structured metrics.
+            replay_fill = agent.replay.capacity / max(cfg.min_sampling_size, 1)
+            metrics: dict[str, float] = {
+                "episode/return": ep_return,
+                "episode/length": n_steps,
+                f"track/{track_slug}/episode_return": ep_return,
+                f"track/{track_slug}/episode_length": n_steps,
+                "env_steps": agent.env_steps,
+                "grad_steps": agent.grad_steps,
+                "replay/capacity": agent.replay.capacity,
+                "replay/fill_ratio": replay_fill,
+                "env/id": i,
+            }
+            for comp, val in rb_sums.items():
+                metrics[f"reward/{comp}"] = val
+            with agent_lock:
+                for slug, weight in agent.sampler.distribution().items():
+                    metrics[f"track_sampler/{slug}/weight"] = weight
+            logger.log(metrics, step=agent.env_steps)
+
+    threads = [
+        threading.Thread(target=_rollout_worker, args=(i,), name=f"rollout-{i}", daemon=True)
+        for i in range(cfg.num_envs)
+    ]
+    for t in threads:
+        t.start()
+    try:
+        # Main-thread loop: drive learn_step + checkpointing + warmup logging.
+        last_learn_env_steps = 0
+        last_warmup_log_env_steps = 0
+        last_ckpt_grad_steps = -1
+        log_cadence = cfg.log_every_grad_steps
+        try:
+            while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
+                # Learn-step cadence: one per total env step (matches single-env
+                # replay_ratio=1 semantics scaled across envs). We batch them
+                # together under the lock to avoid fine-grained contention.
+                with agent_lock:
+                    current_env_steps = agent.env_steps
+                    replay_warm = agent.replay.capacity >= cfg.min_sampling_size
+
+                if replay_warm:
+                    delta = current_env_steps - last_learn_env_steps
+                    if delta > 0:
+                        with agent_lock:
+                            for _ in range(delta * cfg.replay_ratio):
+                                learn_metrics = agent.learn_step()
+                                if (
+                                    learn_metrics
+                                    and log_cadence > 0
+                                    and agent.grad_steps > 0
+                                    and agent.grad_steps % log_cadence == 0
+                                ):
+                                    learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
+                                    logger.log(learn_log, step=agent.env_steps)
+                        last_learn_env_steps = current_env_steps
+
+                # Warmup-progress log (throttled).
+                if (
+                    not replay_warm
+                    and current_env_steps - last_warmup_log_env_steps >= max(cfg.min_sampling_size // 20, 100)
+                ):
+                    log.info(
+                        "warmup: replay=%d/%d (%.1f%%) env_steps=%d",
+                        agent.replay.capacity, cfg.min_sampling_size,
+                        100.0 * agent.replay.capacity / max(cfg.min_sampling_size, 1),
+                        current_env_steps,
+                    )
+                    last_warmup_log_env_steps = current_env_steps
+
+                # Checkpoint cadence.
+                with agent_lock:
+                    grad_steps_now = agent.grad_steps
+                if (
+                    grad_steps_now > 0
+                    and cfg.checkpoint_every_grad_steps > 0
+                    and grad_steps_now % cfg.checkpoint_every_grad_steps == 0
+                    and grad_steps_now != last_ckpt_grad_steps
+                ):
+                    ckpt_path = Path(cfg.log_dir) / f"{run_name}_grad{grad_steps_now}.pt"
+                    with agent_lock:
+                        _save_checkpoint(agent, cfg, ckpt_path)
+                    _prune_old_checkpoints(
+                        Path(cfg.log_dir), run_name, cfg.keep_last_n_checkpoints,
+                    )
+                    last_ckpt_grad_steps = grad_steps_now
+
+                # Avoid spinning when nothing changed.
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            log.warning("KeyboardInterrupt — signalling rollout threads")
+            shutdown_flag["shutdown"] = True
+
+        # Propagate any error captured from a rollout thread.
+        if aborted_with_error is not None:
+            if "consecutive non-finite" in str(aborted_with_error):
+                aborted_due_to_divergence = True
+                log.error("training diverged — will save as _diverged.pt")
+    finally:
+        # Wait for rollout threads to wind down BEFORE touching shared
+        # resources (logger.close, env.close). Without this join-first
+        # ordering a rollout thread mid-logger.log() races against the
+        # finally's logger.close() and crashes with "I/O on closed file".
+        shutdown_flag["shutdown"] = True
+        for t in threads:
+            t.join(timeout=30)
+            if t.is_alive():
+                log.warning("%s didn't exit within 30s", t.name)
+        suffix = "_diverged" if aborted_due_to_divergence else "_final"
+        try:
+            final_path = Path(cfg.log_dir) / f"{run_name}{suffix}.pt"
+            with agent_lock:
+                _save_checkpoint(agent, cfg, final_path)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to save final checkpoint")
+        for i, e in enumerate(env_slots):
+            try:
+                e.close()
+            except Exception:  # noqa: BLE001
+                log.exception("error closing env %d", i)
+        try:
+            logger.close()
+        except Exception:  # noqa: BLE001
+            log.exception("error closing logger")
+        restore_sigterm()
+
+    if aborted_with_error is not None and not aborted_due_to_divergence:
+        raise aborted_with_error
+    return agent
+
+
 def train(
     cfg: TrainConfig,
     env: MkwDolphinEnv | None = None,
@@ -1138,7 +1453,18 @@ def train(
             run_name = time.strftime("btr_%Y%m%d_%H%M%S")
 
     logger = make_logger(cfg, run_name)
-    log.info("starting training — run=%s device=%s", run_name, cfg.device)
+    log.info(
+        "starting training — run=%s device=%s num_envs=%d",
+        run_name, cfg.device, cfg.num_envs,
+    )
+
+    if cfg.num_envs > 1:
+        if env is not None:
+            raise ValueError(
+                "explicit env= kwarg not supported when cfg.num_envs > 1; "
+                "pass cfg only — multi-env launches happen inside train()"
+            )
+        return _train_vector(cfg, agent, logger, run_name)
 
     if env is None:
         env = _make_env(cfg)
