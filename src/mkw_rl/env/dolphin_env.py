@@ -309,9 +309,14 @@ class MkwDolphinEnv(gym.Env):
         # Capture subprocess stdout+stderr to a log file. Without this,
         # Dolphin tracebacks vanish on Vast.ai (no attached tty to nohup from),
         # and debugging a crash requires re-running under strace.
+        # Append ("ab") not truncate ("wb") so a crash → relaunch sequence
+        # preserves the first crash's log context (the relaunch would
+        # otherwise stomp it before anyone reads it). The file is opened
+        # fresh on every _launch_dolphin so crash/relaunch boundaries stay
+        # visible via the surrounding "[env N] launching:" log lines.
         log_path = self._dolphin_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._dolphin_log_fh = open(log_path, "wb")  # noqa: SIM115 — held for lifetime of subprocess
+        self._dolphin_log_fh = open(log_path, "ab")  # noqa: SIM115 — held for lifetime of subprocess
         log.info("[env %d] launching: %s (log → %s)", self.env_id, " ".join(cmd), log_path)
         # Argv-list + shell=False + start_new_session=True. The new session
         # puts Dolphin in its own process-group / session, detaching it from
