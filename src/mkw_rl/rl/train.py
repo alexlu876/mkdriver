@@ -1064,9 +1064,10 @@ def _make_env(cfg: TrainConfig, env_id: int | None = None) -> MkwDolphinEnv:
     writes Dolphin's stdout/stderr next to our CSV/ckpt outputs.
 
     ``env_id`` overrides ``cfg.env_id`` when constructing one env in a
-    multi-env setup. With num_envs > 1, ``cfg.dolphin_app`` must point at the
-    PARENT directory (which contains dolphin0/, dolphin1/, ...) and this
-    function appends ``dolphin{env_id}`` to pick the right per-env binary.
+    multi-env setup. With num_envs > 1, ``cfg.dolphin_app`` should point at
+    the canonical ``dolphin0/`` install; this function picks the sibling
+    ``dolphin{env_id}/`` from the same parent directory for env_ids > 0.
+    That keeps single-env configs usable verbatim in multi-env runs.
     """
     effective_env_id = env_id if env_id is not None else cfg.env_id
     kwargs: dict[str, Any] = {
@@ -1077,8 +1078,11 @@ def _make_env(cfg: TrainConfig, env_id: int | None = None) -> MkwDolphinEnv:
     }
     if cfg.dolphin_app is not None:
         if cfg.num_envs > 1:
-            # Parent-dir mode: pick the per-env Dolphin install.
-            kwargs["dolphin_app"] = str(Path(cfg.dolphin_app) / f"dolphin{effective_env_id}")
+            # Sibling-dir mode: ``cfg.dolphin_app`` is expected to point at
+            # ``dolphin0/``; we resolve to the sibling ``dolphin{env_id}/``
+            # in the same parent dir.
+            parent = Path(cfg.dolphin_app).parent
+            kwargs["dolphin_app"] = str(parent / f"dolphin{effective_env_id}")
         else:
             kwargs["dolphin_app"] = cfg.dolphin_app
     if cfg.iso is not None:
