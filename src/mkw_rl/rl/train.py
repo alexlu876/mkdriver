@@ -1253,8 +1253,8 @@ def _train_vector(
                     env_streak = per_env_crash_streaks[i]
                     track_streak = track_crash_counts[track_slug]
                 log.error(
-                    "[env %d] crashed on %s (%s); env_streak=%d/%d track_streak=%d/%d — relaunching",
-                    i, track_slug, exc,
+                    "[env %d] crashed on %s (%s: %r); env_streak=%d/%d track_streak=%d/%d — relaunching",
+                    i, track_slug, type(exc).__name__, str(exc),
                     env_streak, MAX_ENV_CRASHES,
                     track_streak, MAX_TRACK_CRASHES,
                 )
@@ -1272,8 +1272,19 @@ def _train_vector(
                             "track %s crashed %d times across envs; removed from sampler",
                             track_slug, track_streak,
                         )
-                    except (KeyError, RuntimeError):
+                    except KeyError:
+                        # Already removed by another thread — race between duplicate crashes.
                         pass
+                    except RuntimeError as rm_exc:
+                        # sampler.remove_track raises RuntimeError when the last
+                        # track is removed. There's nothing left to sample, so
+                        # abort the whole run with a clean message.
+                        shutdown_flag["shutdown"] = True
+                        aborted_with_error = RuntimeError(
+                            f"last track ({track_slug}) removed after {track_streak} crashes — "
+                            f"no tracks remain to sample from: {rm_exc}"
+                        )
+                        return
                 try:
                     env_slots[i].close()
                 except Exception:  # noqa: BLE001
