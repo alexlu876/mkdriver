@@ -43,6 +43,7 @@ import copy
 import csv
 import logging
 import os
+import platform
 import random
 import re
 import signal
@@ -1168,6 +1169,43 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_stale_x11_state() -> None:
+    """Wipe leftover Xvfb sockets + xvfb-run work dirs in /tmp.
+
+    Each Dolphin launch picks a fresh X display via ``xvfb-run -a``. When a
+    run crashes (common during dev, and inevitable over a multi-hour prod
+    run that relaunches envs on EOFError), the X socket under
+    ``/tmp/.X11-unix/XNN`` and the xvfb-run scratch dir ``/tmp/xvfb-run.XXX``
+    can persist. After enough accumulation (~10 orphans observed on Vast),
+    Dolphin's Qt init interacts badly with the leftover state and SIGSEGVs
+    silently during the first ``reset()`` — crashing every subsequent
+    relaunch until the orphans are cleaned.
+
+    Scope is ``/tmp`` globs only; we don't touch X sockets owned by live
+    processes since the pattern matches only numeric display sockets that
+    Xvfb creates. Intended to run once at ``train()`` start on Linux; no-op
+    elsewhere.
+    """
+    if platform.system() != "Linux":
+        return
+    import glob  # noqa: PLC0415
+    removed = 0
+    for pattern in ("/tmp/.X11-unix/X*", "/tmp/.X*-lock", "/tmp/xvfb-run.*"):
+        for p in glob.glob(pattern):
+            try:
+                if os.path.isdir(p):
+                    import shutil  # noqa: PLC0415
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.unlink(p)
+                removed += 1
+            except OSError:
+                # Another process holds it / permission denied / already gone.
+                pass
+    if removed:
+        log.info("cleaned up %d stale X11/xvfb-run artifacts in /tmp", removed)
+
+
 def _train_vector(
     cfg: TrainConfig,
     agent: "BTRAgent",
@@ -1464,6 +1502,11 @@ def train(
     string is generated.
     """
     random.seed(cfg.seed)
+
+    # Wipe stale Xvfb artifacts before spawning any Dolphin — see
+    # _cleanup_stale_x11_state's docstring for the full story. Safe no-op
+    # on non-Linux and on a fresh box with nothing to clean.
+    _cleanup_stale_x11_state()
 
     agent = BTRAgent.build(cfg)
     if resume_from is not None:
