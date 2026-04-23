@@ -1197,6 +1197,12 @@ def _train_vector(
     shutdown_flag, restore_sigterm = _install_shutdown_handler()
     # Guards crash-counter dict updates from multiple rollout threads.
     crash_lock = threading.Lock()
+    # track_crash_counts is CONSECUTIVE crashes per track — reset to 0 on any
+    # successful episode on that track. A monotonic total (the original
+    # semantics) makes long single-track runs unkillable because even a
+    # healthy 2% crash rate hits the threshold after ~150 episodes. We
+    # only want to drop a track when it's CURRENTLY failing, not because
+    # of failures hours ago that were recovered from.
     track_crash_counts: dict[str, int] = {}
     per_env_crash_streaks: list[int] = [0] * cfg.num_envs
     MAX_ENV_CRASHES = 5
@@ -1229,6 +1235,9 @@ def _train_vector(
                 )
                 with crash_lock:
                     per_env_crash_streaks[i] = 0
+                    # Track recovered — clear its crash counter so past flakes
+                    # don't accumulate toward MAX_TRACK_CRASHES.
+                    track_crash_counts.pop(track_slug, None)
             except RuntimeError as exc:
                 if "consecutive non-finite" in str(exc):
                     # NaN abort from learn_step (though learn_step shouldn't
@@ -1505,6 +1514,9 @@ def train(
                     logger=logger, shutdown_flag=shutdown_flag,
                 )
                 env_crash_streak = 0
+                # Track recovered — clear its crash count so past flakes
+                # don't accumulate toward MAX_TRACK_CRASHES over a long run.
+                track_crash_counts.pop(track_slug, None)
             except RuntimeError as exc:
                 # NaN-abort path from learn_step — propagate but flag so the
                 # finally: block saves to _diverged.pt, preserving a forensic
