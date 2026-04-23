@@ -688,6 +688,50 @@ class TestCheckpointRoundTrip:
         load_checkpoint(fresh, ckpt_path)
         assert fresh.sampler.progress == saved_progress
 
+    def test_save_replay_opt_in_includes_replay(self, tmp_path: Path) -> None:
+        """save_replay=True embeds replay; save_replay=False (default) skips
+        it. Resume with replay restores capacity; resume without leaves the
+        fresh agent's replay empty so warmup re-fires."""
+        from mkw_rl.rl.train import BTRAgent, _save_checkpoint, load_checkpoint
+        import numpy as _np
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+
+        # Populate replay with enough transitions to see non-zero capacity.
+        rng = _np.random.default_rng(0)
+        for i in range(30):
+            s = rng.integers(0, 256, size=(cfg.framestack, cfg.imagey, cfg.imagex), dtype=_np.uint8)
+            ns = rng.integers(0, 256, size=(cfg.framestack, cfg.imagey, cfg.imagex), dtype=_np.uint8)
+            agent.replay.append(
+                state=s, action=i % 4, reward=float(i),
+                n_state=ns, done=(i == 29), trun=False, stream=0,
+            )
+        seeded_capacity = agent.replay.capacity
+        assert seeded_capacity > 0, "test setup: expected replay to have grown"
+
+        # Save WITHOUT replay (periodic ckpt behavior).
+        periodic_path = tmp_path / "periodic.pt"
+        _save_checkpoint(agent, cfg, periodic_path, save_replay=False)
+        fresh1 = BTRAgent.build(cfg)
+        load_checkpoint(fresh1, periodic_path)
+        assert fresh1.replay.capacity == 0, (
+            "periodic ckpt should not restore replay — warmup must re-fire"
+        )
+
+        # Save WITH replay (final/diverged ckpt behavior).
+        final_path = tmp_path / "final.pt"
+        _save_checkpoint(agent, cfg, final_path, save_replay=True)
+        fresh2 = BTRAgent.build(cfg)
+        load_checkpoint(fresh2, final_path)
+        assert fresh2.replay.capacity == seeded_capacity, (
+            f"final ckpt should restore replay: got {fresh2.replay.capacity} "
+            f"expected {seeded_capacity}"
+        )
+        # And the restored replay samples identically.
+        assert _np.array_equal(fresh2.replay.state_mem, agent.replay.state_mem)
+        assert _np.array_equal(fresh2.replay.st.sum_tree, agent.replay.st.sum_tree)
+
 
 # ---------------------------------------------------------------------------
 # FakeEnv + rollout / crash-restart / shutdown tests.

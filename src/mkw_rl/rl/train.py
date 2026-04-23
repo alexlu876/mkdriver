@@ -977,24 +977,42 @@ def run_one_episode(
 # ---------------------------------------------------------------------------
 
 
-def _save_checkpoint(agent: BTRAgent, cfg: TrainConfig, path: Path) -> None:
-    """Serialize agent state to ``path``. Replay buffer is NOT stored —
-    re-warmup on resume is ~200K steps (<0.1% of a 500M-frame run)."""
+def _save_checkpoint(
+    agent: BTRAgent, cfg: TrainConfig, path: Path, save_replay: bool = False,
+) -> None:
+    """Serialize agent state to ``path``.
+
+    ``save_replay=False`` (default, used by periodic ``_grad{N}.pt`` saves):
+    skips the replay buffer. This keeps periodic checkpoints small and fast
+    — at production scale the full ``state_mem`` is ~19 GB and we cycle a
+    ckpt every 10K grad steps.
+
+    ``save_replay=True`` (used for ``_final.pt`` / ``_diverged.pt``): embeds
+    the replay buffer so ``--resume`` picks up the ~3h warmup state for
+    free on the next launch. These fire only at run exit (clean shutdown
+    or NaN-abort), so the 19 GB I/O cost lands once per run, not every
+    few minutes. Combined with the ckpt-rotation policy (periodic grad
+    ckpts capped at 5), total disk stays bounded.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "online": agent.online_net.state_dict(),
-            "target": agent.target_net.state_dict(),
-            "optimizer": agent.optimizer.state_dict(),
-            "grad_steps": agent.grad_steps,
-            "env_steps": agent.env_steps,
-            "nonfinite_streak": agent.nonfinite_streak,
-            "sampler_state": agent.sampler.state_dict(),
-            "config": cfg.__dict__,
-        },
-        path,
+    payload: dict[str, Any] = {
+        "online": agent.online_net.state_dict(),
+        "target": agent.target_net.state_dict(),
+        "optimizer": agent.optimizer.state_dict(),
+        "grad_steps": agent.grad_steps,
+        "env_steps": agent.env_steps,
+        "nonfinite_streak": agent.nonfinite_streak,
+        "sampler_state": agent.sampler.state_dict(),
+        "config": cfg.__dict__,
+    }
+    if save_replay:
+        payload["replay"] = agent.replay.state_dict()
+    torch.save(payload, path)
+    log.info(
+        "saved checkpoint %s (grad=%d env=%d%s)",
+        path, agent.grad_steps, agent.env_steps,
+        " +replay" if save_replay else "",
     )
-    log.info("saved checkpoint %s (grad=%d env=%d)", path, agent.grad_steps, agent.env_steps)
 
 
 def _prune_old_checkpoints(log_dir: Path, run_name: str, keep_last_n: int) -> None:
@@ -1024,11 +1042,20 @@ def _prune_old_checkpoints(log_dir: Path, run_name: str, keep_last_n: int) -> No
 def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
     """Restore agent state in place from a ``_save_checkpoint`` output.
 
-    Replay is not saved/loaded — the outer train loop re-warms from scratch.
-    This means the first ~200K steps post-resume are random-policy exploration
-    (matching min_sampling_size) regardless of the resumed grad_step count.
+    If the checkpoint includes a ``replay`` payload (produced by
+    ``_save_checkpoint(..., save_replay=True)`` — currently only
+    ``_final.pt`` / ``_diverged.pt``), the replay buffer is restored too,
+    skipping the ~3h warmup on resume. Checkpoints without a ``replay``
+    field (periodic ``_grad{N}.pt``) leave the replay empty — the outer
+    train loop re-warms from scratch, which takes ~200K env_steps of
+    random-policy collection before ``min_sampling_size`` opens the
+    learn-step gate.
     """
-    ckpt = torch.load(path, map_location=agent.device)
+    # weights_only=False because our payloads include numpy arrays
+    # (replay.state_mem, pointer_mem structured dtypes, etc.) which the
+    # weights_only=True default in PyTorch 2.6+ refuses. Safe since we're
+    # only loading our own checkpoints, not arbitrary ones.
+    ckpt = torch.load(path, map_location=agent.device, weights_only=False)
     agent.online_net.load_state_dict(ckpt["online"])
     agent.target_net.load_state_dict(ckpt["target"])
     agent.optimizer.load_state_dict(ckpt["optimizer"])
@@ -1037,6 +1064,14 @@ def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
     agent.nonfinite_streak = int(ckpt.get("nonfinite_streak", 0))
     if "sampler_state" in ckpt:
         agent.sampler.load_state_dict(ckpt["sampler_state"])
+    if "replay" in ckpt:
+        agent.replay.load_state_dict(ckpt["replay"])
+        log.info(
+            "restored replay buffer from ckpt (capacity=%d, full=%s)",
+            agent.replay.capacity, agent.replay.st.full,
+        )
+    else:
+        log.info("ckpt has no replay payload — will re-warm from scratch")
     # load_state_dict preserves the source module's training flag via its
     # values but doesn't set the destination's mode. Re-assert target.eval()
     # to keep spectral_norm power iteration + noise disabled on target.
@@ -1580,7 +1615,7 @@ def _train_vector(
         try:
             final_path = Path(cfg.log_dir) / f"{run_name}{suffix}.pt"
             with agent_lock:
-                _save_checkpoint(agent, cfg, final_path)
+                _save_checkpoint(agent, cfg, final_path, save_replay=True)
         except Exception:  # noqa: BLE001
             log.exception("failed to save final checkpoint")
         for i, e in enumerate(env_slots):
@@ -1813,7 +1848,7 @@ def train(
         suffix = "_diverged" if aborted_due_to_divergence else "_final"
         try:
             final_path = Path(cfg.log_dir) / f"{run_name}{suffix}.pt"
-            _save_checkpoint(agent, cfg, final_path)
+            _save_checkpoint(agent, cfg, final_path, save_replay=True)
         except Exception:  # noqa: BLE001 — don't mask the original exception
             log.exception("failed to save final checkpoint")
         try:

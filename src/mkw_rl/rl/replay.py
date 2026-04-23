@@ -149,6 +149,36 @@ class SumTree:
     def total(self) -> float:
         return self.sum_tree[0]
 
+    def state_dict(self) -> dict:
+        """Serialize enough state to reconstruct the tree exactly.
+
+        ``size`` and ``tree_start`` are derived from the constructor arg and
+        re-checked at load time; we skip them here and let a mismatch be
+        caught when load_state_dict asserts against the freshly-constructed
+        object's dimensions.
+        """
+        return {
+            "sum_tree": self.sum_tree,
+            "index": self.index,
+            "full": self.full,
+            "max": self.max,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore from a ``state_dict()`` payload. The newly-constructed
+        SumTree must have the same ``size`` / ``tree_start`` the payload was
+        built with — caller is responsible for that."""
+        if state["sum_tree"].shape != self.sum_tree.shape:
+            raise ValueError(
+                f"SumTree size mismatch on load: ckpt shape {state['sum_tree'].shape} "
+                f"vs current {self.sum_tree.shape}. Replay config changed between "
+                f"save and resume — rebuild ckpt or match the original PER size."
+            )
+        self.sum_tree = state["sum_tree"]
+        self.index = state["index"]
+        self.full = state["full"]
+        self.max = state["max"]
+
 
 class PER:
     """Prioritized experience replay with frame-stacking and n-step returns.
@@ -746,3 +776,82 @@ class PER:
 
         self.max_prio = max(self.max_prio, np.max(priorities))
         self.st.update(idxs, priorities**self.alpha)
+
+    # ------------------------------------------------------------------
+    # Checkpoint serialization.
+    # ------------------------------------------------------------------
+    #
+    # Save/load is opt-in at the train.py layer: only ``_final.pt`` and
+    # ``_diverged.pt`` carry replay payloads; periodic ``_grad{N}.pt``
+    # checkpoints skip it. Rationale: the full state_mem at prod scale
+    # is ~19 GB (1.75M slots × 75×140 uint8); writing that every 10K
+    # grad steps would eat disk + slow each ckpt. Writing it once on
+    # clean exit makes ``--resume`` recover the ~3h warmup state for free.
+    #
+    # Scope: we save only the state needed to resume sampling. Config
+    # params (size/framestack/n_step/etc.) are NOT saved — the caller
+    # rebuilds a same-shape PER from the TrainConfig and then calls
+    # ``load_state_dict``. Shape mismatch between payload and fresh
+    # object surfaces as a loud ValueError.
+
+    def state_dict(self) -> dict:
+        """Return a dict serializable via torch.save / numpy pickling."""
+        return {
+            "sumtree": self.st.state_dict(),
+            "index": self.index,
+            "capacity": self.capacity,
+            "point_mem_idx": self.point_mem_idx,
+            "state_mem_idx": self.state_mem_idx,
+            "reward_mem_idx": self.reward_mem_idx,
+            "max_prio": self.max_prio,
+            "last_terminal": list(self.last_terminal),
+            "tstep_counter": list(self.tstep_counter),
+            "state_buffer": [list(b) for b in self.state_buffer],
+            "reward_buffer": [list(b) for b in self.reward_buffer],
+            # Memory arrays — big ones live here. The action/reward/done/trun
+            # arrays are small (1.83M × small-dtype); state_mem is the 19 GB.
+            "state_mem": self.state_mem,
+            "action_mem": self.action_mem,
+            "reward_mem": self.reward_mem,
+            "done_mem": self.done_mem,
+            "trun_mem": self.trun_mem,
+            "pointer_mem": self.pointer_mem,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore from a ``state_dict()`` payload. The freshly-constructed
+        PER must already have same shapes (size, framestack, imagex/y, n_step,
+        storage_size_multiplier) as when the payload was produced.
+        """
+        # Validate shapes first — a mismatch means the config changed and
+        # silently overwriting would produce corrupt sampling.
+        for key in (
+            "state_mem", "action_mem", "reward_mem", "done_mem",
+            "trun_mem", "pointer_mem",
+        ):
+            have = getattr(self, key).shape
+            want = state[key].shape
+            if have != want:
+                raise ValueError(
+                    f"PER.{key} shape mismatch on load: ckpt {want} vs current {have}. "
+                    f"Replay config changed between save and resume — either rebuild "
+                    f"the ckpt or match the original PER config in TrainConfig."
+                )
+        self.st.load_state_dict(state["sumtree"])
+        self.index = state["index"]
+        self.capacity = state["capacity"]
+        self.point_mem_idx = state["point_mem_idx"]
+        self.state_mem_idx = state["state_mem_idx"]
+        self.reward_mem_idx = state["reward_mem_idx"]
+        self.max_prio = state["max_prio"]
+        self.last_terminal = list(state["last_terminal"])
+        self.tstep_counter = list(state["tstep_counter"])
+        self.state_buffer = [list(b) for b in state["state_buffer"]]
+        self.reward_buffer = [list(b) for b in state["reward_buffer"]]
+        # Copy in-place so downstream references to these arrays stay valid.
+        self.state_mem[:] = state["state_mem"]
+        self.action_mem[:] = state["action_mem"]
+        self.reward_mem[:] = state["reward_mem"]
+        self.done_mem[:] = state["done_mem"]
+        self.trun_mem[:] = state["trun_mem"]
+        self.pointer_mem[:] = state["pointer_mem"]

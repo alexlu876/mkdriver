@@ -346,6 +346,116 @@ class TestPER:
             per.sample(4)
 
 
+class TestPERSerialization:
+    """Round-trip save → load of PER.state_dict via torch.save/load.
+
+    Matters for --resume: previously checkpoints excluded replay entirely
+    (3-hour re-warmup on every resume). Now _final.pt / _diverged.pt
+    embed it; a silent shape/field mismatch in save/load would produce a
+    post-resume run with a corrupt buffer → wrong priority sampling →
+    divergence without any obvious error. These tests catch that.
+    """
+
+    def _make_per(self, size: int = 64, n: int = 3, envs: int = 2) -> PER:
+        return PER(
+            size=size, device="cpu", n=n, envs=envs, gamma=0.99,
+            framestack=4, imagex=12, imagey=10, storage_size_multiplier=2.0,
+        )
+
+    def _populate(self, per: PER, n_transitions: int = 30, seed: int = 0) -> None:
+        import numpy as _np
+        rng = _np.random.default_rng(seed)
+        num_envs = len(per.last_terminal)
+        for i in range(n_transitions):
+            state = rng.integers(0, 256, size=(4, per.imagey, per.imagex), dtype=_np.uint8)
+            n_state = rng.integers(0, 256, size=(4, per.imagey, per.imagex), dtype=_np.uint8)
+            per.append(
+                state=state, action=i % 4, reward=0.1 * i,
+                n_state=n_state, done=(i == n_transitions - 1),
+                trun=False, stream=i % num_envs,
+            )
+
+    def test_round_trip_via_torch_save(self, tmp_path: Path) -> None:
+        """Save → torch.save → torch.load → load into a fresh PER; verify
+        every field matches + a subsequent sample() would return the same
+        transition for the same random seed."""
+        import torch as _torch
+        p1 = self._make_per()
+        self._populate(p1, n_transitions=25)
+
+        ckpt_path = tmp_path / "per.pt"
+        _torch.save(p1.state_dict(), ckpt_path)
+
+        p2 = self._make_per()
+        p2.load_state_dict(_torch.load(ckpt_path, weights_only=False))
+
+        # Scalar + per-env state.
+        assert p2.capacity == p1.capacity
+        assert p2.index == p1.index
+        assert p2.point_mem_idx == p1.point_mem_idx
+        assert p2.state_mem_idx == p1.state_mem_idx
+        assert p2.reward_mem_idx == p1.reward_mem_idx
+        assert p2.max_prio == p1.max_prio
+        assert p2.last_terminal == p1.last_terminal
+        assert p2.tstep_counter == p1.tstep_counter
+
+        # Big memory arrays.
+        assert np.array_equal(p2.state_mem, p1.state_mem)
+        assert np.array_equal(p2.action_mem, p1.action_mem)
+        assert np.array_equal(p2.reward_mem, p1.reward_mem)
+        assert np.array_equal(p2.done_mem, p1.done_mem)
+        assert np.array_equal(p2.trun_mem, p1.trun_mem)
+        # pointer_mem is a structured dtype; compare field-by-field.
+        for field in p1.pointer_mem.dtype.names:
+            assert np.array_equal(p2.pointer_mem[field], p1.pointer_mem[field])
+
+        # SumTree contents (priority sampling must be identical).
+        assert np.array_equal(p2.st.sum_tree, p1.st.sum_tree)
+        assert p2.st.index == p1.st.index
+        assert p2.st.full == p1.st.full
+        assert p2.st.max == p1.st.max
+
+    def test_round_trip_preserves_sampling(self, tmp_path: Path) -> None:
+        """Deterministic check: given the same numpy seed, the same batch
+        sampled before and after a save→load round-trip should match."""
+        import torch as _torch
+        p1 = self._make_per()
+        self._populate(p1, n_transitions=40)
+
+        ckpt_path = tmp_path / "per.pt"
+        _torch.save(p1.state_dict(), ckpt_path)
+
+        # Sample from p1.
+        _np_seed = 12345
+        np.random.seed(_np_seed)
+        idxs1, *rest1 = p1.sample_sequences(batch_size=2, seq_len=4)
+
+        # Fresh PER, load, sample with same seed.
+        p2 = self._make_per()
+        p2.load_state_dict(_torch.load(ckpt_path, weights_only=False))
+        np.random.seed(_np_seed)
+        idxs2, *rest2 = p2.sample_sequences(batch_size=2, seq_len=4)
+
+        assert np.array_equal(idxs1, idxs2)
+
+    def test_shape_mismatch_raises(self) -> None:
+        """Loading a payload built with different config dims must fail
+        loudly rather than silently load garbage."""
+        p1 = self._make_per(size=64)
+        self._populate(p1, n_transitions=20)
+        sd = p1.state_dict()
+
+        # Fresh PER with different framestack → state_mem shape differs.
+        p2 = PER(
+            size=64, device="cpu", n=3, envs=2, gamma=0.99,
+            framestack=4, imagex=16, imagey=10,  # imagex changed 12→16
+            storage_size_multiplier=2.0,
+        )
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="shape mismatch"):
+            p2.load_state_dict(sd)
+
+
 # ---------------------------------------------------------------------------
 # R2D2 recurrent sampling (sample_sequences).
 # ---------------------------------------------------------------------------
