@@ -154,11 +154,13 @@ Before committing to a multi-hour production run, do a ~10-minute shakedown with
     --config configs/btr.yaml \
     --num-envs 4 \
     --device cuda \
-    --min-sampling-size 2000 \
-    --total-frames 30000 \
+    --min-sampling-size 20000 \
+    --total-frames 50000 \
     --checkpoint-every-grad-steps 1000 \
     --run-name shakedown_$(date -u +%Y%m%d_%H%M%S)
 ```
+
+`min_sampling_size=20000` isn't arbitrary — it needs to exceed roughly `batch_size × seq_len × N` (where `seq_len = burn_in_len + learning_seq_len = 60` and `N ≳ 4` for seam-avoidance in the recurrent sampler). Below that, `sample_sequences` hits a "couldn't find non-seam starts" RuntimeError before the learn-step can verify model memory. Production's 200K threshold is way above this; shakedowns just need to clear the sampler-viability floor.
 
 What this exercises end-to-end:
 - 4-Dolphin launch + slave handshake + X11 cleanup

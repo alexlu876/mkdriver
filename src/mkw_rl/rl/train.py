@@ -1007,7 +1007,12 @@ def _save_checkpoint(
     }
     if save_replay:
         payload["replay"] = agent.replay.state_dict()
-    torch.save(payload, path)
+    # pickle_protocol=4 is required because replay.state_mem is pre-allocated
+    # at full storage_size (19 GB at production scale) regardless of fill —
+    # pickle <4 has a 4 GB limit per string and torch.save's default hits it.
+    # Protocol 4 raises the limit to 2^64 bytes. Harmless for replay-less
+    # ckpts (they're ~55 MB total and far under any protocol's limit).
+    torch.save(payload, path, pickle_protocol=4)
     log.info(
         "saved checkpoint %s (grad=%d env=%d%s)",
         path, agent.grad_steps, agent.env_steps,
