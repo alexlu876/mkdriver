@@ -118,7 +118,30 @@ The pipeline also runs on Linux CUDA hosts (Vast.ai). The env module auto-detect
 
    Running through `uv run` on Vast.ai silently prevents Dolphin's embedded scripting engine from initializing — the emulator boots fine and burns ~700% CPU running the game, but the Python slave never executes, so the master socket never sees a connection and training stalls at the header row. Direct `.venv/bin/python` launches produce identical results to `uv run` for all other code but fix scripting. Reason not fully nailed down (likely `uv run`'s env/fd manipulation interacting with Dolphin's embedded CPython init via `subprocess.Popen`); bypassing `uv run` is the only reliable workaround found.
 
-   Dolphin's stdout/stderr is captured to `{log_dir}/dolphin_env_0.log` for post-mortem diagnosis. Checkpoints land in `{log_dir}/{run_name}_grad{N}.pt` with rotation keeping the newest 5; `_final.pt` / `_diverged.pt` are never pruned. Resume with `--resume {path} [--run-name {name}]`.
+   Dolphin's stdout/stderr is captured to `{log_dir}/dolphin_env_{i}.log` (one per env) for post-mortem diagnosis. Checkpoints land in `{log_dir}/{run_name}_grad{N}.pt` with rotation keeping the newest 5; `_final.pt` / `_diverged.pt` are never pruned. Resume with `--resume {path} [--run-name {name}]`.
+
+### Multi-env (parallel Dolphins)
+
+VIPTankz trains with 4 parallel Dolphin instances to amortize emulation cost over a bigger GPU feed. We support N envs via `env.num_envs` in `configs/btr.yaml`:
+
+```bash
+# One-time: clone dolphin0/ into dolphin1/, dolphin2/, ... Each env needs its
+# own Dolphin install because portable.txt forces Dolphin to use ./User/
+# next to the binary, so shared dirs mean shared shader/JIT caches.
+.venv/bin/python scripts/setup_dolphin_instances.py \
+    --parent third_party/Wii-RL --num-envs 4
+
+# Then bump env.num_envs in the YAML or use a sed override in your run
+# script:  sed -i 's/num_envs: 1/num_envs: 4/' configs/btr.yaml
+```
+
+Known scaling quirks (Vast.ai 64-core EPYC + RTX 5080):
+
+- **2 envs**: stable, ~2× throughput vs single-env. Recommended baseline.
+- **4+ envs**: observed Dolphin SIGSEGV under concurrent startup — often on envs 1–3 even while env 0 runs fine. Workaround under investigation (likely needs staggered spawn or a retry-with-reclone policy). The crash corrupts `dolphin{i}/User/` caches, and subsequent launches from the same dir will also SIGSEGV until the dir is re-cloned from `dolphin0/`.
+- **Recovery after SIGSEGV**: `rm -rf third_party/Wii-RL/dolphin{1..N}` then re-run `setup_dolphin_instances.py`. The script skips existing dirs by default, so this is idempotent if you keep `dolphin0/` clean as the canonical source.
+- **Replay buffer** already supports per-env streams (`PER(envs=N, ...)` path) — no changes needed.
+- **Env rate**: ~6 env-steps/sec per Dolphin on this hardware, ~12 env-steps/sec with 2 envs. At `min_sampling_size=200K` that's ~4–5 h of warmup before the first gradient.
 
 ## What's next
 
