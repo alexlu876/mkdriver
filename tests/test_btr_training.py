@@ -1105,6 +1105,81 @@ class TestMultiEnv:
             train(cfg, env=stub_env)
 
 
+class TestCleanupStaleX11State:
+    """Coverage for _cleanup_stale_x11_state — the fix for the Vast.ai
+    Dolphin-SIGSEGV-after-10-orphans issue. Without this, the function
+    could silently break on a future refactor of the glob patterns."""
+
+    def test_removes_x11_sockets_and_lock_and_xvfb_dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        import platform as _platform
+
+        from mkw_rl.rl.train import _cleanup_stale_x11_state
+
+        # Redirect the hardcoded /tmp paths in the helper via a fake root.
+        # Simulates the Vast /tmp directory structure.
+        fake_tmp = tmp_path / "tmp"
+        (fake_tmp / ".X11-unix").mkdir(parents=True)
+        (fake_tmp / ".X11-unix" / "X142").write_bytes(b"")
+        (fake_tmp / ".X11-unix" / "X148").write_bytes(b"")
+        (fake_tmp / ".X148-lock").write_bytes(b"12345\n")
+        (fake_tmp / "xvfb-run.abc123").mkdir()
+        (fake_tmp / "xvfb-run.abc123" / "Xauthority").write_bytes(b"")
+        (fake_tmp / "xvfb-run.xyz789").mkdir()
+        # Decoy files that should NOT be touched.
+        (fake_tmp / "unrelated.txt").write_bytes(b"keep me")
+        (fake_tmp / ".X11-unix" / "README").write_bytes(b"not a socket")
+
+        import mkw_rl.rl.train as train_mod
+        original_glob = __import__("glob").glob
+
+        def patched_glob(pattern: str) -> list[str]:
+            # Rewrite /tmp/... patterns to fake_tmp/... during this test.
+            if pattern.startswith("/tmp/"):
+                pattern = str(fake_tmp / pattern[len("/tmp/"):])
+            return original_glob(pattern)
+
+        # Also pin platform.system() to Linux so the function doesn't no-op
+        # when the test host is macOS. The helper imports glob locally so
+        # we patch the stdlib module's global entry point.
+        monkeypatch.setattr(train_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr("glob.glob", patched_glob)
+
+        _cleanup_stale_x11_state()
+
+        # X sockets + lock + xvfb-run dirs should all be gone.
+        assert not (fake_tmp / ".X11-unix" / "X142").exists()
+        assert not (fake_tmp / ".X11-unix" / "X148").exists()
+        assert not (fake_tmp / ".X148-lock").exists()
+        assert not (fake_tmp / "xvfb-run.abc123").exists()
+        assert not (fake_tmp / "xvfb-run.xyz789").exists()
+        # Decoys preserved.
+        assert (fake_tmp / "unrelated.txt").read_bytes() == b"keep me"
+        assert (fake_tmp / ".X11-unix" / "README").read_bytes() == b"not a socket"
+
+    def test_noop_on_non_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """On macOS dev machines the helper must not touch anything —
+        we don't want to kill the user's real X session on a Linux workstation
+        that's running actual X, and we certainly don't want to touch macOS
+        tmp files. The function gates on platform.system() == 'Linux'."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import _cleanup_stale_x11_state
+
+        # Pin to a non-Linux value; assert the function returns without
+        # touching anything. We detect 'touched anything' by counting glob calls.
+        monkeypatch.setattr(train_mod.platform, "system", lambda: "Darwin")
+        import glob as _glob
+        call_count = [0]
+        original = _glob.glob
+
+        def spy(pattern: str) -> list[str]:
+            call_count[0] += 1
+            return original(pattern)
+
+        monkeypatch.setattr("glob.glob", spy)
+        _cleanup_stale_x11_state()
+        assert call_count[0] == 0, "helper should no-op on non-Linux"
+
+
 class TestCheckpointRotation:
     def test_prune_keeps_last_n(self, tmp_path: Path) -> None:
         # Create 7 fake grad ckpts with increasing mtimes.
