@@ -1120,6 +1120,92 @@ class TestMultiEnv:
         with pytest.raises(ValueError, match="must point at a directory named 'dolphin0'"):
             _make_env(cfg, env_id=1)
 
+    def test_multi_env_recovers_from_transient_env_crash(self, tmp_path: Path) -> None:
+        """An env that crashes once mid-rollout should be relaunched, other
+        envs should keep running, and the whole run should complete once
+        total_frames is reached. Covers the threaded crash-recovery path
+        that Vast's ~20% EOFError rate exercises in production."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(
+            tmp_path,
+            num_envs=2,
+            total_frames=80,
+            min_sampling_size=10_000,
+        )
+        lock = __import__("threading").Lock()
+        construction_counts: dict[int, int] = {}
+
+        def fake_make(c: TrainConfig, env_id: int | None = None) -> _FakeEnv:  # noqa: ARG001
+            eid = env_id if env_id is not None else 0
+            with lock:
+                construction_counts[eid] = construction_counts.get(eid, 0) + 1
+                nth_for_this_env = construction_counts[eid]
+            # Only the FIRST env 1 instance crashes — immediately on its
+            # first reset. The relaunched env 1 runs cleanly. env 0 always
+            # clean. Using reset #1 (not #2) guarantees the crash happens
+            # before total_frames could be reached by the other env alone.
+            crash_on = 1 if (eid == 1 and nth_for_this_env == 1) else None
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[0.25] * 6,
+                crash_on_reset_n=crash_on,
+                crash_error=BrokenPipeError,
+            )
+
+        with patch.object(train_mod, "_make_env", side_effect=fake_make):
+            agent = train(cfg)
+
+        # Run completed (env_steps hit target).
+        assert agent.env_steps >= cfg.total_frames, (
+            f"run didn't complete: env_steps={agent.env_steps} total={cfg.total_frames}"
+        )
+        # Env 1 was built at least twice (once before crash, once after).
+        assert construction_counts.get(1, 0) >= 2, (
+            f"expected env 1 to be relaunched after crash, got "
+            f"construction_counts={construction_counts}"
+        )
+        # Env 0 never crashed so it was built exactly once.
+        assert construction_counts.get(0, 0) == 1
+
+    def test_multi_env_aborts_on_persistent_env_crashes(self, tmp_path: Path) -> None:
+        """An env that crashes on every single reset should eventually hit
+        MAX_ENV_CRASHES=5 and abort the whole run. Needed because without
+        this bound a broken env could relaunch forever while the rest of
+        the system silently wastes compute."""
+        import mkw_rl.rl.train as train_mod
+        from mkw_rl.rl.train import train
+
+        cfg = _tiny_cfg(
+            tmp_path,
+            num_envs=2,
+            total_frames=500,
+            min_sampling_size=10_000,
+        )
+        # Pre-create a second savestate so remove_track doesn't leave the
+        # sampler empty before the env_streak limit can fire.
+        (Path(cfg.savestate_dir) / "mushroom_gorge_tt.sav").write_bytes(b"")
+
+        def fake_make(c: TrainConfig, env_id: int | None = None) -> _FakeEnv:  # noqa: ARG001
+            eid = env_id if env_id is not None else 0
+            # env 1 crashes on EVERY reset; env 0 runs cleanly.
+            crash_on = 1 if eid == 1 else None
+            return _FakeEnv(
+                framestack=c.framestack, h=c.imagey, w=c.imagex,
+                scripted_rewards=[0.1] * 4,
+                crash_on_reset_n=crash_on,
+                crash_error=BrokenPipeError,
+            )
+
+        # The run should raise because env 1 will hit MAX_ENV_CRASHES=5
+        # consecutive failures. train() re-raises the captured error.
+        with (
+            patch.object(train_mod, "_make_env", side_effect=fake_make),
+            pytest.raises(RuntimeError, match=r"(consecutive crashes|no tracks remain)"),
+        ):
+            train(cfg)
+
     def test_make_env_accepts_dolphin0_path_when_multi(self, tmp_path: Path) -> None:
         """Correct shape: dolphin_app = '.../dolphin0' → sibling '.../dolphin1'."""
         from mkw_rl.rl.train import _make_env

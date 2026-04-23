@@ -138,8 +138,9 @@ VIPTankz trains with 4 parallel Dolphin instances to amortize emulation cost ove
 Known scaling quirks (Vast.ai 64-core EPYC + RTX 5080):
 
 - **2 envs**: stable, ~2× throughput vs single-env. Recommended baseline.
-- **4+ envs**: observed Dolphin SIGSEGV under concurrent startup — often on envs 1–3 even while env 0 runs fine. Workaround under investigation (likely needs staggered spawn or a retry-with-reclone policy). The crash corrupts `dolphin{i}/User/` caches, and subsequent launches from the same dir will also SIGSEGV until the dir is re-cloned from `dolphin0/`.
-- **Recovery after SIGSEGV**: `rm -rf third_party/Wii-RL/dolphin{1..N}` then re-run `setup_dolphin_instances.py`. The script skips existing dirs by default, so this is idempotent if you keep `dolphin0/` clean as the canonical source.
+- **4 envs**: stable after the `_cleanup_stale_x11_state` fix (auto-runs at `train()` start — wipes leftover `/tmp/.X11-unix/X*` sockets and `/tmp/xvfb-run.*` dirs older than 5 min). The previous SIGSEGV symptoms were 100% caused by orphan X11 state from earlier crashed Dolphins; with cleanup the 4-env production config passes smokes and crashes at the normal ~20% transient rate (each recovered by the per-env retry path).
+- **Verifying dolphin{i}/ health**: if you suspect a clone is corrupt, run `scripts/setup_dolphin_instances.py --parent <parent> --num-envs N --verify` — it checks each `dolphin-emu` exists + is executable + has the portable marker. Non-zero exit means at least one env is broken; re-clone it with `--force`.
+- **Recovery after a confirmed-broken clone**: `rm -rf third_party/Wii-RL/dolphin{i}` then re-run `setup_dolphin_instances.py`. The script skips existing healthy dirs by default and warns loudly about broken ones.
 - **Replay buffer** already supports per-env streams (`PER(envs=N, ...)` path) — no changes needed.
 - **Env rate**: ~6 env-steps/sec per Dolphin on this hardware, ~12 env-steps/sec with 2 envs. At `min_sampling_size=200K` that's ~4–5 h of warmup before the first gradient.
 

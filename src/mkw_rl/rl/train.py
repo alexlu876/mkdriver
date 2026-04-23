@@ -1432,7 +1432,16 @@ def _train_vector(
             with agent_lock:
                 for slug, weight in agent.sampler.distribution().items():
                     metrics[f"track_sampler/{slug}/weight"] = weight
-            logger.log(metrics, step=agent.env_steps)
+            # Best-effort log — if the main thread already closed the logger
+            # (its finally: ran after a 30s join timed out and the thread
+            # kept going), ValueError bubbles up from the CSV writer. We
+            # prefer a silent skip over a PytestUnhandledThreadExceptionWarning
+            # or, worse, a crash in production. The operator has all
+            # metrics up to the point of logger close.
+            try:
+                logger.log(metrics, step=agent.env_steps)
+            except (ValueError, OSError):
+                return
 
     threads = [
         threading.Thread(target=_rollout_worker, args=(i,), name=f"rollout-{i}", daemon=True)

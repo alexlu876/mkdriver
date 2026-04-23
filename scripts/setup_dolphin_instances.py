@@ -16,8 +16,14 @@ Usage
 ::
 
     # On Vast.ai, parent dir is /root/mkwii/third_party/Wii-RL.
-    uv run python scripts/setup_dolphin_instances.py \\
+    .venv/bin/python scripts/setup_dolphin_instances.py \\
         --parent /root/mkwii/third_party/Wii-RL --num-envs 4
+
+    # Health-check existing clones (does not create or modify anything).
+    # Catches corruption from interrupted copies, SIGSEGV damage, or manual
+    # edits that broke the binary.
+    .venv/bin/python scripts/setup_dolphin_instances.py \\
+        --parent /root/mkwii/third_party/Wii-RL --num-envs 4 --verify
 
 Idempotent — skips directories that already exist. Safe to re-run.
 """
@@ -25,10 +31,34 @@ Idempotent — skips directories that already exist. Safe to re-run.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import time
 from pathlib import Path
+
+
+def _verify_install(path: Path) -> list[str]:
+    """Return a list of human-readable problems with the given dolphin{i}/
+    install. Empty list = healthy. Checks are cheap: exist + executable +
+    non-empty binary + portable marker."""
+    problems: list[str] = []
+    if not path.exists():
+        return [f"{path} does not exist"]
+    if not path.is_dir():
+        problems.append(f"{path} is not a directory")
+        return problems
+    binary = path / "dolphin-emu"
+    if not binary.exists():
+        problems.append(f"{binary} missing (dolphin-emu binary not found)")
+    elif not os.access(binary, os.X_OK):
+        problems.append(f"{binary} not executable (chmod +x it, or re-clone)")
+    elif binary.stat().st_size < 1024:
+        problems.append(f"{binary} is suspiciously small ({binary.stat().st_size} bytes)")
+    portable = path / "portable.txt"
+    if not portable.exists():
+        problems.append(f"{portable} missing (Dolphin needs the portable marker)")
+    return problems
 
 
 def main() -> int:
@@ -51,7 +81,16 @@ def main() -> int:
         "--force",
         action="store_true",
         help="Remove existing dolphin{i}/ directories before copying. "
-        "Default is to skip existing dirs (idempotent).",
+        "Default is to skip existing dirs (idempotent). "
+        "DESTRUCTIVE: wipes User/ (saved config, shader cache, any local "
+        "mods). Use after a confirmed SIGSEGV where state is corrupt.",
+    )
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help="Health-check existing dolphin{i}/ dirs instead of cloning. "
+        "Reports corruption (missing binary, non-executable, missing "
+        "portable marker) and exits non-zero if any env is broken.",
     )
     args = ap.parse_args()
 
@@ -66,6 +105,28 @@ def main() -> int:
         print(f"error: {src} doesn't contain a dolphin-emu binary", file=sys.stderr)
         return 1
 
+    if args.verify:
+        total_problems = 0
+        for i in range(args.num_envs):
+            dst = args.parent / f"dolphin{i}"
+            problems = _verify_install(dst)
+            if problems:
+                total_problems += len(problems)
+                print(f"[{i}/{args.num_envs - 1}] {dst}: UNHEALTHY")
+                for p in problems:
+                    print(f"  - {p}")
+            else:
+                print(f"[{i}/{args.num_envs - 1}] {dst}: ok")
+        if total_problems:
+            print(
+                f"\n{total_problems} problem(s) across {args.num_envs} envs. "
+                f"Re-clone broken envs with --force.",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"\nall {args.num_envs} Dolphin instances look healthy")
+        return 0
+
     for i in range(1, args.num_envs):
         dst = args.parent / f"dolphin{i}"
         if dst.exists():
@@ -73,7 +134,19 @@ def main() -> int:
                 print(f"[{i}/{args.num_envs - 1}] removing existing {dst}")
                 shutil.rmtree(dst)
             else:
-                print(f"[{i}/{args.num_envs - 1}] skipping {dst} (exists)")
+                # Quick health check — if the existing dir is broken, warn
+                # loudly so the user runs --force to re-clone.
+                problems = _verify_install(dst)
+                if problems:
+                    print(
+                        f"[{i}/{args.num_envs - 1}] WARNING: {dst} exists but "
+                        f"looks broken. Run with --force to re-clone. Problems:",
+                        file=sys.stderr,
+                    )
+                    for p in problems:
+                        print(f"  - {p}", file=sys.stderr)
+                else:
+                    print(f"[{i}/{args.num_envs - 1}] skipping {dst} (exists, looks healthy)")
                 continue
         t0 = time.time()
         print(f"[{i}/{args.num_envs - 1}] copying {src} → {dst} ...", flush=True)

@@ -40,6 +40,31 @@ Multi-agent audit surfaced 6 blockers + 9 high-severity findings. Applied:
 
 27 new unit tests in `tests/test_btr_training.py` covering: config merge, quantile-Huber (+Dabney axis), Munchausen reward bonus clamping, full loss pathway (including zero-weights → zero-grad, munch_alpha=0 vs 0.9 divergence, all-dones gating), `_CSVLogger` disjoint-key round-trip, `BTRAgent.act` / `sync_target` / `learn_step` (incl. noop-before-warmup + NaN bail + priority writeback), and full checkpoint save → load → match round-trip (weights + counters + sampler EMA). 269 tests total pass.
 
+### Phase 2.4 — multi-env + eval + Vast stabilization (2026-04-22 → 2026-04-23)
+
+Goal: scale from single-env to VIPTankz's 4-parallel-Dolphin pattern so a real production run fits in days rather than months, on a Vast.ai RTX 5080 box. The phase was mostly infra fights against Dolphin's runtime behavior — the ML code barely changed. Covered:
+
+- **Multi-env rollout** (`_train_vector` in `src/mkw_rl/rl/train.py`) — thread-per-env with a shared `agent_lock`, replay streams per env_id via the existing PER multi-stream support, per-env crash recovery. Gated on `env.num_envs` in YAML (default 1 preserves legacy single-env path). `scripts/setup_dolphin_instances.py` clones `dolphin0/` into siblings `dolphin1..N/` (required because Felk's portable.txt forces Dolphin to a binary-relative `User/` dir, which concurrent instances would fight over).
+- **Dolphin boot stabilization on Linux headless** — commits `e566cbb…ab50d2f` iterated through `--batch`, `QT_QPA_PLATFORM`, `xvfb-run -a`, `--no-python-subinterpreters`, `-C Logger.Options.WriteToConsole=True`, `--script=path` equals-syntax, `shell=False` + `start_new_session=True`, and `PYTHONUNBUFFERED=1` before landing a reliable launch. Each iteration solved a different symptom: "no X display", "Qt hang at picker", "invisible scripting logs", "dropped --script arg", "slave init never fires under uv-run".
+- **`uv run` foot-gun** — running `uv run python scripts/train_btr.py` on Vast silently prevents Dolphin's embedded scripting engine from initializing; bypass with `.venv/bin/python` directly. Root cause not fully nailed down (uv's env/fd manipulation interacting with CPython's embedded init); fix is documented in `SETUP.md` and a feedback memory entry.
+- **Stale Xvfb cleanup** (`_cleanup_stale_x11_state`) — every crashed Dolphin leaves an X socket at `/tmp/.X11-unix/XNN` and a scratch dir `/tmp/xvfb-run.XXX`. After ~10 orphans Dolphin's Qt init SIGSEGVs silently during the first `reset()`. Helper runs at `train()` start, deletes artifacts older than 5 min (liveness guard so it doesn't nuke concurrent eval processes).
+- **Process-group close** — `MkwDolphinEnv.close()` now `os.killpg(SIGTERM)`s the whole session (xvfb-run + Xvfb + dolphin-emu) instead of just the top shell. Without this, each env teardown orphaned ~1.4 GB of Dolphin state.
+- **Crash-counter semantics** — per-track counter tripped long runs (monotonic) or ping-ponged forever (reset-on-any-success); settled on "reset after `CRASH_RESET_AFTER_SUCCESSES=3` consecutive clean episodes". Applied to both single-env and multi-env paths.
+- **Mid-batch shutdown check** — main learn-step loop now breaks out of its inner `range(delta × replay_ratio)` batch when `shutdown_flag` fires, preventing a NaN-abort from grinding hundreds of poisoned gradients into `_diverged.pt`.
+- **Eval driver** — `scripts/eval_btr.py`: loads a checkpoint, rolls greedy against live Dolphin with `disable_noise()` + `act(deterministic=True)`, prints per-ep returns + reward component breakdown, optional JSON output for return curves. Safe to run alongside a live trainer (doesn't call `_cleanup_stale_x11_state`).
+- **CLI hardening** — `--num-envs` override on `train_btr.py`; `--verify` mode on `setup_dolphin_instances.py`; assert that `cfg.dolphin_app` ends in `dolphin0` when `num_envs > 1` so misconfigured macOS paths fail loud instead of silently building `dolphin0/dolphin1`.
+- **Diagnostic polish** — per-episode `log.info` line so tmux tail shows progress; append (not truncate) `dolphin_env_{i}.log` on relaunch so crash context survives; improved exception-type/repr in the crash-log format.
+
+### Tests (Phase 2.4)
+
+34 new tests in `tests/test_btr_training.py`: `TestMultiEnv` (5 — construction, final ckpt, rejects env=, asserts dolphin_app shape, accepts dolphin0 path), `TestCleanupStaleX11State` (3 — removes stale, no-op on non-Linux, preserves live <5 min artifacts), `TestDeterministicAct` (2 — noise-stays-zeroed + plumbing through run_one_episode), `TestEvalBtrScript` (1 — end-to-end via FakeEnv). Plus 2 multi-env crash-recovery tests covering transient relaunch + persistent MAX_ENV_CRASHES abort. **303 tests total pass.**
+
+### Known open items (Phase 2.4)
+
+- **4+ envs not measured at scale** — 2-env smoke clean, 4-env production currently running (~30 min in at last check, no aborts). Lock contention on `agent_lock` likely caps linear scaling at 4–6 envs; hasn't been profiled.
+- **More savestates needed** — only Luigi Circuit is live-tested. 24 of 25 track_metadata entries have no savestate; multi-track training blocked until user records them.
+- **Consecutive-crash reset in multi-track** — the N-successes-to-reset semantics is defensible for single-track but hasn't been stress-tested with a 20-track curriculum where per-track crash rates vary wildly. May need windowed-rate semantics once multi-track runs start.
+
 ## Pre-pivot (BC) history — superseded
 
 ## TL;DR
