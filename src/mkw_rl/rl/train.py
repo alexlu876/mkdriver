@@ -1220,6 +1220,15 @@ def train(
             agent.sampler.update(track_slug, ep_return)
             episode_idx += 1
 
+            # Per-episode stdout summary so tmux tail shows progress without
+            # tail -f'ing the CSV. Emitted regardless of whether the structured
+            # `logger` is wandb or CSV — useful for a live eyeball check.
+            log.info(
+                "ep=%d track=%s return=%.2f len=%d env_steps=%d grad_steps=%d",
+                episode_idx, track_slug, ep_return, n_steps,
+                agent.env_steps, agent.grad_steps,
+            )
+
             replay_fill = agent.replay.capacity / max(cfg.min_sampling_size, 1)
             if (
                 replay_fill < 1.0
