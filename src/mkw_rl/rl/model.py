@@ -74,6 +74,13 @@ class BTRConfig:
     # harder environments. Disable only for ablation / weight-transfer with
     # a non-spectral checkpoint.
     spectral_norm: bool = True
+    # Gradient checkpointing on the encoder: during training forward, don't
+    # store per-block activations for backward — recompute them during
+    # backward instead. ~30% extra compute per learn_step, but drops
+    # encoder activation memory ~80%. Required to fit bs=128 × seq_len=60
+    # BPTT on a 32 GB GPU; pure bf16 is not enough on its own. Inference
+    # (target forward under no_grad, act(), eval_btr) bypasses it.
+    gradient_checkpointing: bool = True
 
 
 class _DuelingBranch(nn.Module):
@@ -132,6 +139,7 @@ class BTRPolicy(nn.Module):
             input_hw=self.cfg.input_hw,
             use_spectral_norm=self.cfg.spectral_norm,
             layer_norm=self.cfg.layer_norm,
+            gradient_checkpointing=self.cfg.gradient_checkpointing,
         )
 
         self.lstm = nn.LSTM(

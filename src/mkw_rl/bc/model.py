@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 from mkw_rl.dtm.action_encoding import N_STEERING_BINS
 
@@ -143,10 +144,12 @@ class ImpalaEncoder(nn.Module):
         input_hw: tuple[int, int] = (75, 140),
         use_spectral_norm: bool = False,
         layer_norm: bool = False,
+        gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.feature_dim = feature_dim
+        self.use_gradient_checkpointing = gradient_checkpointing
 
         c1, c2, c3 = channels
         self.block1 = _ImpalaBlock(in_channels, c1, use_spectral_norm=use_spectral_norm)
@@ -179,9 +182,29 @@ class ImpalaEncoder(nn.Module):
         self.linear = nn.Linear(flat_dim, feature_dim)
 
     def _forward_conv(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
+        # Gradient checkpointing: only active when training. During inference
+        # (target forward, eval, act()), we skip it — no backward graph needed.
+        # Re-runs each block's forward during backward instead of storing
+        # intermediate activations — for bs=128 × seq_len=60 BPTT, this drops
+        # per-block activation storage from ~GB to near zero, trading ~30%
+        # extra compute for ~80% less encoder memory. Without checkpointing
+        # the BTR config at VIPTankz hyperparameters OOMs on 32 GB GPUs.
+        if self.training and self.use_gradient_checkpointing:
+            # use_reentrant=False is the modern-correct mode; retains
+            # autocast state across the checkpoint boundary.
+            x = torch.utils.checkpoint.checkpoint(
+                self.block1, x, use_reentrant=False,
+            )
+            x = torch.utils.checkpoint.checkpoint(
+                self.block2, x, use_reentrant=False,
+            )
+            x = torch.utils.checkpoint.checkpoint(
+                self.block3, x, use_reentrant=False,
+            )
+        else:
+            x = self.block1(x)
+            x = self.block2(x)
+            x = self.block3(x)
         return F.relu(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
