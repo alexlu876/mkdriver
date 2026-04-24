@@ -1533,8 +1533,23 @@ def _train_vector(
                 if replay_warm:
                     delta = current_env_steps - last_learn_env_steps
                     if delta > 0:
+                        # Cap per-outer-iter learn steps. At warmup completion
+                        # delta jumps to ~200K; doing that many learn_step()s
+                        # in one tight loop under the lock (a) starves rollout
+                        # workers of the lock for minutes and (b) accumulates
+                        # PyTorch allocator-cached buffers across iterations
+                        # faster than Python's refcount GC can reclaim them,
+                        # leading to OOM on the first or second learn_step
+                        # regardless of GPU size. Chunking to 16 per outer
+                        # iter gives GC time to run (the outer loop sleeps
+                        # 10ms between iterations) and keeps the lock short.
+                        # At 22 env-steps/sec on 4 envs, 16 learn_steps per
+                        # 10ms + 100ms main-loop cycle catches up in ~3min
+                        # without pathological memory accumulation.
+                        MAX_LEARN_PER_ITER = 16
+                        chunk = min(delta, MAX_LEARN_PER_ITER)
                         with agent_lock:
-                            for _ in range(delta * cfg.replay_ratio):
+                            for _ in range(chunk * cfg.replay_ratio):
                                 # Respect shutdown mid-batch. Without this, a
                                 # NaN-triggered shutdown (or user SIGTERM) can
                                 # grind through hundreds more learn_step()
@@ -1552,7 +1567,7 @@ def _train_vector(
                                 ):
                                     learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
                                     logger.log(learn_log, step=agent.env_steps)
-                        last_learn_env_steps = current_env_steps
+                        last_learn_env_steps += chunk
 
                 # Warmup-progress log (throttled).
                 if (

@@ -1,0 +1,315 @@
+  # multi-env rollout; each env_id=0..num_envs-1 gets its own dolphin{i}/
+  num_envs: 4
+  # With num_envs == 1, dolphin_app points at a single Dolphin install.
+  # With num_envs > 1, _make_env appends dolphin{env_id}/ to dolphin_app's
+2026-04-23 02:22:54,221 INFO [mkw_rl.rl.train] cleaned up 3 stale X11/xvfb-run artifacts in /tmp
+2026-04-23 02:22:56,347 INFO [mkw_rl.rl.train] using CSV logger at runs/btr/luigi_4env_20260423_022252.csv
+2026-04-23 02:22:56,348 INFO [mkw_rl.rl.train] starting training — run=luigi_4env_20260423_022252 device=cuda num_envs=4
+2026-04-23 02:22:56,358 INFO [mkw_rl.env.dolphin_env] [env 0] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:22:56,369 INFO [mkw_rl.env.dolphin_env] [env 1] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:22:56,388 INFO [mkw_rl.env.dolphin_env] [env 2] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:22:56,399 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:22:56,403 INFO [mkw_rl.env.dolphin_env] [env 2] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:22:56,404 INFO [mkw_rl.env.dolphin_env] [env 2] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin2/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_2.log)
+2026-04-23 02:22:56,404 INFO [mkw_rl.env.dolphin_env] [env 0] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:22:56,405 INFO [mkw_rl.env.dolphin_env] [env 1] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:22:56,405 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:22:56,405 INFO [mkw_rl.env.dolphin_env] [env 1] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin1/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_1.log)
+2026-04-23 02:22:56,405 INFO [mkw_rl.env.dolphin_env] [env 0] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin0/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_0.log)
+2026-04-23 02:22:56,406 INFO [mkw_rl.env.dolphin_env] [env 2] listening on :26332 (accept timeout=300s)
+2026-04-23 02:22:56,406 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 02:22:56,408 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 02:22:56,408 INFO [mkw_rl.env.dolphin_env] [env 1] listening on :26331 (accept timeout=300s)
+2026-04-23 02:22:56,408 INFO [mkw_rl.env.dolphin_env] [env 0] listening on :26330 (accept timeout=300s)
+2026-04-23 02:22:58,399 INFO [mkw_rl.env.dolphin_env] [env 2] slave connected
+2026-04-23 02:22:58,542 INFO [mkw_rl.env.dolphin_env] [env 1] slave connected
+2026-04-23 02:22:58,606 INFO [mkw_rl.env.dolphin_env] [env 0] slave connected
+2026-04-23 02:22:58,612 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 02:23:11,512 ERROR [mkw_rl.rl.train] [env 1] crashed on luigi_circuit_tt (EOFError: ''); env_streak=1/5 track_streak=1/3 — relaunching
+2026-04-23 02:23:11,535 INFO [mkw_rl.env.dolphin_env] [env 1] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:23:11,537 INFO [mkw_rl.env.dolphin_env] [env 1] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:23:11,537 INFO [mkw_rl.env.dolphin_env] [env 1] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin1/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_1.log)
+2026-04-23 02:23:11,539 INFO [mkw_rl.env.dolphin_env] [env 1] listening on :26331 (accept timeout=300s)
+2026-04-23 02:23:13,503 INFO [mkw_rl.env.dolphin_env] [env 1] slave connected
+2026-04-23 02:23:28,835 INFO [mkw_rl.rl.train] ep=1[env=2] track=luigi_circuit_tt return=-15.01 len=241 env_steps=716 grad_steps=0
+2026-04-23 02:23:33,024 ERROR [mkw_rl.rl.train] [env 1] crashed on luigi_circuit_tt (EOFError: ''); env_streak=2/5 track_streak=1/3 — relaunching
+2026-04-23 02:23:33,039 INFO [mkw_rl.env.dolphin_env] [env 1] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:23:33,040 INFO [mkw_rl.env.dolphin_env] [env 1] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:23:33,040 INFO [mkw_rl.env.dolphin_env] [env 1] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin1/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_1.log)
+2026-04-23 02:23:33,042 INFO [mkw_rl.env.dolphin_env] [env 1] listening on :26331 (accept timeout=300s)
+2026-04-23 02:23:34,949 INFO [mkw_rl.env.dolphin_env] [env 1] slave connected
+2026-04-23 02:23:40,368 INFO [mkw_rl.rl.train] ep=2[env=3] track=luigi_circuit_tt return=-15.37 len=265 env_steps=949 grad_steps=0
+2026-04-23 02:23:43,421 INFO [mkw_rl.rl.train] ep=3[env=0] track=luigi_circuit_tt return=-1.58 len=221 env_steps=1023 grad_steps=0
+2026-04-23 02:24:07,182 INFO [mkw_rl.rl.train] ep=4[env=1] track=luigi_circuit_tt return=-8.24 len=241 env_steps=1616 grad_steps=0
+2026-04-23 02:24:07,610 INFO [mkw_rl.rl.train] ep=5[env=2] track=luigi_circuit_tt return=-4.46 len=232 env_steps=1624 grad_steps=0
+2026-04-23 02:24:09,384 ERROR [mkw_rl.rl.train] [env 1] crashed on luigi_circuit_tt (EOFError: ''); env_streak=1/5 track_streak=1/3 — relaunching
+2026-04-23 02:24:09,399 INFO [mkw_rl.env.dolphin_env] [env 1] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:24:09,400 INFO [mkw_rl.env.dolphin_env] [env 1] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:24:09,400 INFO [mkw_rl.env.dolphin_env] [env 1] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin1/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_1.log)
+2026-04-23 02:24:09,402 INFO [mkw_rl.env.dolphin_env] [env 1] listening on :26331 (accept timeout=300s)
+2026-04-23 02:24:11,383 INFO [mkw_rl.env.dolphin_env] [env 1] slave connected
+2026-04-23 02:24:22,101 INFO [mkw_rl.rl.train] ep=6[env=0] track=luigi_circuit_tt return=-18.13 len=223 env_steps=1917 grad_steps=0
+2026-04-23 02:24:26,353 ERROR [mkw_rl.rl.train] [env 1] crashed on luigi_circuit_tt (EOFError: ''); env_streak=2/5 track_streak=1/3 — relaunching
+2026-04-23 02:24:26,369 INFO [mkw_rl.env.dolphin_env] [env 1] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:24:26,371 INFO [mkw_rl.env.dolphin_env] [env 1] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:24:26,371 INFO [mkw_rl.env.dolphin_env] [env 1] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin1/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_1.log)
+2026-04-23 02:24:26,372 INFO [mkw_rl.env.dolphin_env] [env 1] listening on :26331 (accept timeout=300s)
+2026-04-23 02:24:28,295 INFO [mkw_rl.env.dolphin_env] [env 1] slave connected
+2026-04-23 02:24:38,247 INFO [mkw_rl.rl.train] ep=7[env=3] track=luigi_circuit_tt return=-2.19 len=292 env_steps=2240 grad_steps=0
+2026-04-23 02:24:59,899 INFO [mkw_rl.rl.train] ep=8[env=0] track=luigi_circuit_tt return=-18.53 len=218 env_steps=2825 grad_steps=0
+2026-04-23 02:25:00,135 INFO [mkw_rl.rl.train] ep=9[env=1] track=luigi_circuit_tt return=-15.93 len=246 env_steps=2830 grad_steps=0
+2026-04-23 02:25:12,449 INFO [mkw_rl.rl.train] ep=10[env=2] track=luigi_circuit_tt return=-13.42 len=373 env_steps=3100 grad_steps=0
+2026-04-23 02:25:23,809 INFO [mkw_rl.rl.train] ep=11[env=3] track=luigi_circuit_tt return=-18.00 len=297 env_steps=3359 grad_steps=0
+2026-04-23 02:25:39,953 INFO [mkw_rl.rl.train] ep=12[env=1] track=luigi_circuit_tt return=-11.52 len=252 env_steps=3702 grad_steps=0
+2026-04-23 02:25:56,537 INFO [mkw_rl.rl.train] ep=13[env=0] track=luigi_circuit_tt return=-7.48 len=306 env_steps=4075 grad_steps=0
+2026-04-23 02:26:11,316 INFO [mkw_rl.rl.train] ep=14[env=3] track=luigi_circuit_tt return=-0.22 len=245 env_steps=4366 grad_steps=0
+2026-04-23 02:26:22,441 INFO [mkw_rl.rl.train] ep=15[env=1] track=luigi_circuit_tt return=-10.12 len=238 env_steps=4597 grad_steps=0
+2026-04-23 02:26:37,392 INFO [mkw_rl.rl.train] ep=16[env=2] track=luigi_circuit_tt return=-25.85 len=412 env_steps=4934 grad_steps=0
+2026-04-23 02:26:54,818 INFO [mkw_rl.rl.train] ep=17[env=3] track=luigi_circuit_tt return=-11.35 len=258 env_steps=5347 grad_steps=0
+2026-04-23 02:26:59,909 INFO [mkw_rl.rl.train] ep=18[env=1] track=luigi_circuit_tt return=-28.41 len=243 env_steps=5457 grad_steps=0
+2026-04-23 02:27:01,440 INFO [mkw_rl.rl.train] ep=19[env=0] track=luigi_circuit_tt return=-10.26 len=327 env_steps=5485 grad_steps=0
+2026-04-23 02:27:29,195 INFO [mkw_rl.rl.train] ep=20[env=2] track=luigi_circuit_tt return=-4.71 len=293 env_steps=6157 grad_steps=0
+2026-04-23 02:27:35,516 INFO [mkw_rl.rl.train] ep=21[env=3] track=luigi_circuit_tt return=-2.33 len=221 env_steps=6289 grad_steps=0
+2026-04-23 02:27:37,296 INFO [mkw_rl.rl.train] ep=22[env=1] track=luigi_circuit_tt return=-13.53 len=216 env_steps=6322 grad_steps=0
+2026-04-23 02:27:45,466 INFO [mkw_rl.rl.train] ep=23[env=0] track=luigi_circuit_tt return=-14.28 len=247 env_steps=6508 grad_steps=0
+2026-04-23 02:28:09,294 INFO [mkw_rl.rl.train] ep=24[env=3] track=luigi_circuit_tt return=-19.49 len=211 env_steps=7123 grad_steps=0
+2026-04-23 02:28:10,400 INFO [mkw_rl.rl.train] ep=25[env=2] track=luigi_circuit_tt return=-23.98 len=261 env_steps=7143 grad_steps=0
+2026-04-23 02:28:13,732 INFO [mkw_rl.rl.train] ep=26[env=1] track=luigi_circuit_tt return=-17.33 len=225 env_steps=7211 grad_steps=0
+2026-04-23 02:28:26,962 INFO [mkw_rl.rl.train] ep=27[env=0] track=luigi_circuit_tt return=-19.17 len=235 env_steps=7525 grad_steps=0
+2026-04-23 02:28:47,743 INFO [mkw_rl.rl.train] ep=28[env=2] track=luigi_circuit_tt return=-10.31 len=233 env_steps=8020 grad_steps=0
+2026-04-23 02:28:50,393 INFO [mkw_rl.rl.train] ep=29[env=3] track=luigi_circuit_tt return=-9.03 len=231 env_steps=8072 grad_steps=0
+2026-04-23 02:28:55,953 INFO [mkw_rl.rl.train] ep=30[env=1] track=luigi_circuit_tt return=-14.83 len=248 env_steps=8182 grad_steps=0
+2026-04-23 02:29:24,805 INFO [mkw_rl.rl.train] ep=31[env=0] track=luigi_circuit_tt return=-1.43 len=283 env_steps=8809 grad_steps=0
+2026-04-23 02:29:25,910 INFO [mkw_rl.rl.train] ep=32[env=2] track=luigi_circuit_tt return=-26.51 len=251 env_steps=8835 grad_steps=0
+2026-04-23 02:29:42,566 INFO [mkw_rl.rl.train] ep=33[env=3] track=luigi_circuit_tt return=-6.42 len=293 env_steps=9203 grad_steps=0
+2026-04-23 02:30:10,860 INFO [mkw_rl.rl.train] ep=34[env=0] track=luigi_circuit_tt return=-10.09 len=268 env_steps=9870 grad_steps=0
+2026-04-23 02:30:13,029 INFO [mkw_rl.rl.train] ep=35[env=2] track=luigi_circuit_tt return=-12.69 len=282 env_steps=9915 grad_steps=0
+2026-04-23 02:30:16,931 INFO [mkw_rl.rl.train] warmup: replay=9992/200000 (5.0%) env_steps=10000
+2026-04-23 02:30:23,300 INFO [mkw_rl.rl.train] ep=36[env=3] track=luigi_circuit_tt return=-20.64 len=237 env_steps=10140 grad_steps=0
+2026-04-23 02:30:39,075 INFO [mkw_rl.rl.train] ep=37[env=1] track=luigi_circuit_tt return=0.25 len=517 env_steps=10510 grad_steps=0
+2026-04-23 02:30:51,918 INFO [mkw_rl.rl.train] ep=38[env=0] track=luigi_circuit_tt return=-7.79 len=232 env_steps=10765 grad_steps=0
+2026-04-23 02:31:01,046 INFO [mkw_rl.rl.train] ep=39[env=2] track=luigi_circuit_tt return=-0.59 len=260 env_steps=10952 grad_steps=0
+2026-04-23 02:31:11,793 INFO [mkw_rl.rl.train] ep=40[env=3] track=luigi_circuit_tt return=-1.29 len=246 env_steps=11169 grad_steps=0
+2026-04-23 02:31:24,852 INFO [mkw_rl.rl.train] ep=41[env=1] track=luigi_circuit_tt return=-22.11 len=299 env_steps=11472 grad_steps=0
+2026-04-23 02:31:47,914 INFO [mkw_rl.rl.train] ep=42[env=2] track=luigi_circuit_tt return=-9.42 len=287 env_steps=11968 grad_steps=0
+2026-04-23 02:31:54,099 INFO [mkw_rl.rl.train] ep=43[env=3] track=luigi_circuit_tt return=-4.28 len=221 env_steps=12091 grad_steps=0
+2026-04-23 02:32:21,963 INFO [mkw_rl.rl.train] ep=44[env=2] track=luigi_circuit_tt return=-14.43 len=220 env_steps=12727 grad_steps=0
+2026-04-23 02:32:31,630 INFO [mkw_rl.rl.train] ep=45[env=1] track=luigi_circuit_tt return=-6.45 len=330 env_steps=12928 grad_steps=0
+2026-04-23 02:32:34,914 INFO [mkw_rl.rl.train] ep=46[env=3] track=luigi_circuit_tt return=-11.43 len=244 env_steps=12993 grad_steps=0
+2026-04-23 02:33:03,914 INFO [mkw_rl.rl.train] ep=47[env=0] track=luigi_circuit_tt return=-15.36 len=618 env_steps=13610 grad_steps=0
+2026-04-23 02:33:12,727 INFO [mkw_rl.rl.train] ep=48[env=3] track=luigi_circuit_tt return=-17.11 len=228 env_steps=13822 grad_steps=0
+2026-04-23 02:33:24,838 INFO [mkw_rl.rl.train] ep=49[env=2] track=luigi_circuit_tt return=-3.79 len=339 env_steps=14079 grad_steps=0
+2026-04-23 02:33:24,908 INFO [mkw_rl.rl.train] ep=50[env=1] track=luigi_circuit_tt return=-5.29 len=286 env_steps=14081 grad_steps=0
+2026-04-23 02:33:46,988 INFO [mkw_rl.rl.train] ep=51[env=0] track=luigi_circuit_tt return=-9.88 len=238 env_steps=14635 grad_steps=0
+2026-04-23 02:33:56,878 INFO [mkw_rl.rl.train] ep=52[env=2] track=luigi_circuit_tt return=-18.63 len=219 env_steps=14866 grad_steps=0
+2026-04-23 02:33:57,226 INFO [mkw_rl.rl.train] ep=53[env=3] track=luigi_circuit_tt return=-22.95 len=285 env_steps=14874 grad_steps=0
+2026-04-23 02:34:10,352 INFO [mkw_rl.rl.train] ep=54[env=1] track=luigi_circuit_tt return=-4.67 len=229 env_steps=15156 grad_steps=0
+2026-04-23 02:34:22,043 INFO [mkw_rl.rl.train] ep=55[env=0] track=luigi_circuit_tt return=-26.03 len=226 env_steps=15441 grad_steps=0
+2026-04-23 02:34:38,938 INFO [mkw_rl.rl.train] ep=56[env=2] track=luigi_circuit_tt return=-6.06 len=253 env_steps=15847 grad_steps=0
+2026-04-23 02:34:54,741 INFO [mkw_rl.rl.train] ep=57[env=1] track=luigi_circuit_tt return=-8.51 len=246 env_steps=16189 grad_steps=0
+2026-04-23 02:35:00,938 INFO [mkw_rl.rl.train] ep=58[env=0] track=luigi_circuit_tt return=-21.71 len=238 env_steps=16326 grad_steps=0
+2026-04-23 02:35:01,091 INFO [mkw_rl.rl.train] ep=59[env=3] track=luigi_circuit_tt return=-26.73 len=345 env_steps=16331 grad_steps=0
+2026-04-23 02:35:29,509 INFO [mkw_rl.rl.train] ep=60[env=2] track=luigi_circuit_tt return=-2.70 len=286 env_steps=16981 grad_steps=0
+2026-04-23 02:35:35,240 INFO [mkw_rl.rl.train] ep=61[env=1] track=luigi_circuit_tt return=-9.99 len=244 env_steps=17106 grad_steps=0
+2026-04-23 02:35:44,134 INFO [mkw_rl.rl.train] ep=62[env=0] track=luigi_circuit_tt return=-16.98 len=240 env_steps=17282 grad_steps=0
+2026-04-23 02:35:54,023 INFO [mkw_rl.rl.train] ep=63[env=3] track=luigi_circuit_tt return=-8.66 len=262 env_steps=17515 grad_steps=0
+2026-04-23 02:36:10,319 INFO [mkw_rl.rl.train] ep=64[env=2] track=luigi_circuit_tt return=-12.03 len=260 env_steps=17913 grad_steps=0
+2026-04-23 02:36:21,104 INFO [mkw_rl.rl.train] ep=65[env=0] track=luigi_circuit_tt return=-26.70 len=228 env_steps=18171 grad_steps=0
+2026-04-23 02:36:37,809 INFO [mkw_rl.rl.train] ep=66[env=3] track=luigi_circuit_tt return=-10.85 len=257 env_steps=18543 grad_steps=0
+2026-04-23 02:36:44,476 INFO [mkw_rl.rl.train] ep=67[env=1] track=luigi_circuit_tt return=-27.22 len=349 env_steps=18683 grad_steps=0
+2026-04-23 02:36:47,160 INFO [mkw_rl.rl.train] ep=68[env=2] track=luigi_circuit_tt return=-21.13 len=267 env_steps=18745 grad_steps=0
+2026-04-23 02:37:24,459 INFO [mkw_rl.rl.train] ep=69[env=3] track=luigi_circuit_tt return=-13.54 len=233 env_steps=19568 grad_steps=0
+2026-04-23 02:37:26,150 INFO [mkw_rl.rl.train] ep=70[env=1] track=luigi_circuit_tt return=-9.13 len=239 env_steps=19597 grad_steps=0
+2026-04-23 02:37:27,325 INFO [mkw_rl.rl.train] ep=71[env=2] track=luigi_circuit_tt return=-16.16 len=246 env_steps=19615 grad_steps=0
+2026-04-23 02:37:28,667 INFO [mkw_rl.rl.train] ep=72[env=0] track=luigi_circuit_tt return=-20.26 len=316 env_steps=19635 grad_steps=0
+2026-04-23 02:37:44,128 INFO [mkw_rl.rl.train] warmup: replay=19992/200000 (10.0%) env_steps=20000
+2026-04-23 02:38:05,904 INFO [mkw_rl.rl.train] ep=73[env=0] track=luigi_circuit_tt return=-23.97 len=232 env_steps=20568 grad_steps=0
+2026-04-23 02:38:12,972 INFO [mkw_rl.rl.train] ep=74[env=2] track=luigi_circuit_tt return=-21.49 len=296 env_steps=20700 grad_steps=0
+2026-04-23 02:38:13,183 INFO [mkw_rl.rl.train] ep=75[env=3] track=luigi_circuit_tt return=-6.90 len=266 env_steps=20703 grad_steps=0
+2026-04-23 02:38:14,287 INFO [mkw_rl.rl.train] ep=76[env=1] track=luigi_circuit_tt return=-16.26 len=270 env_steps=20715 grad_steps=0
+2026-04-23 02:38:47,209 INFO [mkw_rl.rl.train] ep=77[env=0] track=luigi_circuit_tt return=-9.66 len=238 env_steps=21487 grad_steps=0
+2026-04-23 02:38:52,450 INFO [mkw_rl.rl.train] ep=78[env=2] track=luigi_circuit_tt return=-20.36 len=244 env_steps=21600 grad_steps=0
+2026-04-23 02:38:59,533 INFO [mkw_rl.rl.train] ep=79[env=1] track=luigi_circuit_tt return=-1.36 len=232 env_steps=21750 grad_steps=0
+2026-04-23 02:39:13,536 INFO [mkw_rl.rl.train] ep=80[env=3] track=luigi_circuit_tt return=-12.83 len=348 env_steps=22084 grad_steps=0
+2026-04-23 02:39:30,725 INFO [mkw_rl.rl.train] ep=81[env=2] track=luigi_circuit_tt return=-14.86 len=237 env_steps=22516 grad_steps=0
+2026-04-23 02:39:36,434 INFO [mkw_rl.rl.train] ep=82[env=0] track=luigi_circuit_tt return=-23.03 len=300 env_steps=22652 grad_steps=0
+2026-04-23 02:39:36,595 INFO [mkw_rl.rl.train] ep=83[env=1] track=luigi_circuit_tt return=-16.38 len=219 env_steps=22656 grad_steps=0
+2026-04-23 02:39:57,893 INFO [mkw_rl.rl.train] ep=84[env=3] track=luigi_circuit_tt return=-19.32 len=256 env_steps=23140 grad_steps=0
+2026-04-23 02:40:10,747 INFO [mkw_rl.rl.train] ep=85[env=2] track=luigi_circuit_tt return=-2.48 len=265 env_steps=23463 grad_steps=0
+2026-04-23 02:40:13,814 INFO [mkw_rl.rl.train] ep=86[env=0] track=luigi_circuit_tt return=-11.05 len=230 env_steps=23533 grad_steps=0
+2026-04-23 02:40:32,652 INFO [mkw_rl.rl.train] ep=87[env=1] track=luigi_circuit_tt return=-12.81 len=299 env_steps=24016 grad_steps=0
+2026-04-23 02:40:36,699 INFO [mkw_rl.rl.train] ep=88[env=3] track=luigi_circuit_tt return=-25.81 len=244 env_steps=24109 grad_steps=0
+2026-04-23 02:40:46,818 INFO [mkw_rl.rl.train] ep=89[env=2] track=luigi_circuit_tt return=-10.98 len=216 env_steps=24338 grad_steps=0
+2026-04-23 02:40:51,727 INFO [mkw_rl.rl.train] ep=90[env=0] track=luigi_circuit_tt return=-24.31 len=243 env_steps=24447 grad_steps=0
+2026-04-23 02:41:13,254 INFO [mkw_rl.rl.train] ep=91[env=1] track=luigi_circuit_tt return=-15.39 len=231 env_steps=24986 grad_steps=0
+2026-04-23 02:41:25,554 INFO [mkw_rl.rl.train] ep=92[env=0] track=luigi_circuit_tt return=-20.13 len=223 env_steps=25242 grad_steps=0
+2026-04-23 02:41:26,058 INFO [mkw_rl.rl.train] ep=93[env=3] track=luigi_circuit_tt return=-10.23 len=269 env_steps=25250 grad_steps=0
+2026-04-23 02:41:33,423 INFO [mkw_rl.rl.train] ep=94[env=2] track=luigi_circuit_tt return=-9.81 len=250 env_steps=25402 grad_steps=0
+2026-04-23 02:42:01,408 INFO [mkw_rl.rl.train] ep=95[env=3] track=luigi_circuit_tt return=-17.08 len=225 env_steps=26070 grad_steps=0
+2026-04-23 02:42:08,142 INFO [mkw_rl.rl.train] ep=96[env=0] track=luigi_circuit_tt return=-2.51 len=236 env_steps=26193 grad_steps=0
+2026-04-23 02:42:12,473 INFO [mkw_rl.rl.train] ep=97[env=1] track=luigi_circuit_tt return=-1.31 len=285 env_steps=26278 grad_steps=0
+2026-04-23 02:42:20,322 INFO [mkw_rl.rl.train] ep=98[env=2] track=luigi_circuit_tt return=-24.66 len=276 env_steps=26446 grad_steps=0
+2026-04-23 02:42:46,060 INFO [mkw_rl.rl.train] ep=99[env=3] track=luigi_circuit_tt return=-7.18 len=261 env_steps=27076 grad_steps=0
+2026-04-23 02:42:47,254 INFO [mkw_rl.rl.train] ep=100[env=0] track=luigi_circuit_tt return=-17.96 len=247 env_steps=27096 grad_steps=0
+2026-04-23 02:42:57,176 INFO [mkw_rl.rl.train] ep=101[env=2] track=luigi_circuit_tt return=-4.00 len=227 env_steps=27302 grad_steps=0
+2026-04-23 02:43:22,270 INFO [mkw_rl.rl.train] ep=102[env=3] track=luigi_circuit_tt return=-7.09 len=210 env_steps=27852 grad_steps=0
+2026-04-23 02:43:33,942 INFO [mkw_rl.rl.train] ep=103[env=0] track=luigi_circuit_tt return=-14.54 len=232 env_steps=28086 grad_steps=0
+2026-04-23 02:43:34,007 INFO [mkw_rl.rl.train] ep=104[env=2] track=luigi_circuit_tt return=-24.63 len=242 env_steps=28087 grad_steps=0
+2026-04-23 02:43:56,453 INFO [mkw_rl.rl.train] ep=105[env=1] track=luigi_circuit_tt return=-3.58 len=511 env_steps=28623 grad_steps=0
+2026-04-23 02:44:15,667 INFO [mkw_rl.rl.train] ep=106[env=0] track=luigi_circuit_tt return=-17.35 len=294 env_steps=29057 grad_steps=0
+2026-04-23 02:44:19,216 INFO [mkw_rl.rl.train] ep=107[env=3] track=luigi_circuit_tt return=-17.23 len=276 env_steps=29130 grad_steps=0
+2026-04-23 02:44:19,958 INFO [mkw_rl.rl.train] ep=108[env=2] track=luigi_circuit_tt return=-3.87 len=245 env_steps=29144 grad_steps=0
+2026-04-23 02:44:41,858 INFO [mkw_rl.rl.train] ep=109[env=1] track=luigi_circuit_tt return=-11.60 len=252 env_steps=29635 grad_steps=0
+2026-04-23 02:44:53,418 INFO [mkw_rl.rl.train] ep=110[env=0] track=luigi_circuit_tt return=-17.32 len=237 env_steps=29893 grad_steps=0
+2026-04-23 02:44:57,940 INFO [mkw_rl.rl.train] warmup: replay=29992/200000 (15.0%) env_steps=30000
+2026-04-23 02:45:00,068 INFO [mkw_rl.rl.train] ep=111[env=2] track=luigi_circuit_tt return=-18.95 len=253 env_steps=30054 grad_steps=0
+2026-04-23 02:45:22,142 INFO [mkw_rl.rl.train] ep=112[env=1] track=luigi_circuit_tt return=-20.40 len=267 env_steps=30642 grad_steps=0
+2026-04-23 02:45:22,300 INFO [mkw_rl.rl.train] ep=113[env=3] track=luigi_circuit_tt return=-9.51 len=327 env_steps=30646 grad_steps=0
+2026-04-23 02:45:40,896 INFO [mkw_rl.rl.train] ep=114[env=0] track=luigi_circuit_tt return=-7.92 len=269 env_steps=31060 grad_steps=0
+2026-04-23 02:45:41,179 INFO [mkw_rl.rl.train] ep=115[env=2] track=luigi_circuit_tt return=-12.76 len=248 env_steps=31066 grad_steps=0
+2026-04-23 02:46:00,528 INFO [mkw_rl.rl.train] ep=116[env=1] track=luigi_circuit_tt return=-9.10 len=229 env_steps=31577 grad_steps=0
+2026-04-23 02:46:01,399 INFO [mkw_rl.rl.train] ep=117[env=3] track=luigi_circuit_tt return=-17.31 len=265 env_steps=31594 grad_steps=0
+2026-04-23 02:46:15,766 INFO [mkw_rl.rl.train] ep=118[env=0] track=luigi_circuit_tt return=-29.06 len=244 env_steps=31927 grad_steps=0
+2026-04-23 02:46:41,579 INFO [mkw_rl.rl.train] ep=119[env=3] track=luigi_circuit_tt return=-16.96 len=251 env_steps=32603 grad_steps=0
+2026-04-23 02:46:42,874 INFO [mkw_rl.rl.train] ep=120[env=1] track=luigi_circuit_tt return=-20.35 len=268 env_steps=32626 grad_steps=0
+2026-04-23 02:46:52,438 INFO [mkw_rl.rl.train] ep=121[env=0] track=luigi_circuit_tt return=-16.66 len=240 env_steps=32823 grad_steps=0
+2026-04-23 02:47:00,793 INFO [mkw_rl.rl.train] ep=122[env=2] track=luigi_circuit_tt return=0.06 len=439 env_steps=33023 grad_steps=0
+2026-04-23 02:47:23,973 INFO [mkw_rl.rl.train] ep=123[env=1] track=luigi_circuit_tt return=-23.34 len=267 env_steps=33624 grad_steps=0
+2026-04-23 02:47:25,046 INFO [mkw_rl.rl.train] ep=124[env=3] track=luigi_circuit_tt return=-13.38 len=284 env_steps=33645 grad_steps=0
+2026-04-23 02:47:27,155 INFO [mkw_rl.rl.train] ep=125[env=0] track=luigi_circuit_tt return=-15.48 len=222 env_steps=33681 grad_steps=0
+2026-04-23 02:48:02,369 INFO [mkw_rl.rl.train] ep=126[env=3] track=luigi_circuit_tt return=-4.74 len=211 env_steps=34435 grad_steps=0
+2026-04-23 02:48:06,601 INFO [mkw_rl.rl.train] ep=127[env=1] track=luigi_circuit_tt return=-2.94 len=241 env_steps=34524 grad_steps=0
+2026-04-23 02:48:24,112 INFO [mkw_rl.rl.train] ep=128[env=2] track=luigi_circuit_tt return=0.27 len=419 env_steps=34938 grad_steps=0
+2026-04-23 02:48:35,835 INFO [mkw_rl.rl.train] ep=129[env=0] track=luigi_circuit_tt return=-0.84 len=337 env_steps=35203 grad_steps=0
+2026-04-23 02:48:41,443 INFO [mkw_rl.rl.train] ep=130[env=3] track=luigi_circuit_tt return=-16.32 len=236 env_steps=35328 grad_steps=0
+2026-04-23 02:48:46,053 INFO [mkw_rl.rl.train] ep=131[env=1] track=luigi_circuit_tt return=-1.10 len=225 env_steps=35431 grad_steps=0
+2026-04-23 02:49:08,997 INFO [mkw_rl.rl.train] ep=132[env=2] track=luigi_circuit_tt return=-16.02 len=251 env_steps=35966 grad_steps=0
+2026-04-23 02:49:15,335 INFO [mkw_rl.rl.train] ep=133[env=0] track=luigi_circuit_tt return=-9.03 len=221 env_steps=36115 grad_steps=0
+2026-04-23 02:49:21,037 INFO [mkw_rl.rl.train] ep=134[env=3] track=luigi_circuit_tt return=-5.54 len=252 env_steps=36250 grad_steps=0
+2026-04-23 02:49:27,044 INFO [mkw_rl.rl.train] ep=135[env=1] track=luigi_circuit_tt return=-3.57 len=252 env_steps=36399 grad_steps=0
+2026-04-23 02:49:48,891 INFO [mkw_rl.rl.train] ep=136[env=2] track=luigi_circuit_tt return=-9.80 len=260 env_steps=36979 grad_steps=0
+2026-04-23 02:49:54,667 INFO [mkw_rl.rl.train] ep=137[env=0] track=luigi_circuit_tt return=-9.89 len=232 env_steps=37115 grad_steps=0
+2026-04-23 02:49:54,928 INFO [mkw_rl.rl.train] ep=138[env=3] track=luigi_circuit_tt return=-24.93 len=229 env_steps=37121 grad_steps=0
+2026-04-23 02:50:02,811 INFO [mkw_rl.rl.train] ep=139[env=1] track=luigi_circuit_tt return=-16.67 len=231 env_steps=37285 grad_steps=0
+2026-04-23 02:50:34,480 INFO [mkw_rl.rl.train] ep=140[env=2] track=luigi_circuit_tt return=-9.24 len=258 env_steps=38053 grad_steps=0
+2026-04-23 02:50:39,463 INFO [mkw_rl.rl.train] ep=141[env=0] track=luigi_circuit_tt return=-3.15 len=269 env_steps=38171 grad_steps=0
+2026-04-23 02:50:46,171 INFO [mkw_rl.rl.train] ep=142[env=3] track=luigi_circuit_tt return=-1.60 len=293 env_steps=38327 grad_steps=0
+2026-04-23 02:50:53,428 INFO [mkw_rl.rl.train] ep=143[env=1] track=luigi_circuit_tt return=-12.51 len=321 env_steps=38506 grad_steps=0
+2026-04-23 02:51:15,348 INFO [mkw_rl.rl.train] ep=144[env=0] track=luigi_circuit_tt return=-21.17 len=235 env_steps=39030 grad_steps=0
+2026-04-23 02:51:16,906 INFO [mkw_rl.rl.train] ep=145[env=2] track=luigi_circuit_tt return=-7.10 len=279 env_steps=39061 grad_steps=0
+2026-04-23 02:51:42,338 INFO [mkw_rl.rl.train] ep=146[env=1] track=luigi_circuit_tt return=-5.94 len=286 env_steps=39716 grad_steps=0
+2026-04-23 02:51:53,381 INFO [mkw_rl.rl.train] warmup: replay=39993/200000 (20.0%) env_steps=40001
+2026-04-23 02:51:53,431 INFO [mkw_rl.rl.train] ep=147[env=0] track=luigi_circuit_tt return=-12.98 len=248 env_steps=40002 grad_steps=0
+2026-04-23 02:51:57,534 INFO [mkw_rl.rl.train] ep=148[env=3] track=luigi_circuit_tt return=0.00 len=397 env_steps=40095 grad_steps=0
+2026-04-23 02:52:00,594 INFO [mkw_rl.rl.train] ep=149[env=2] track=luigi_circuit_tt return=0.05 len=279 env_steps=40163 grad_steps=0
+2026-04-23 02:52:12,516 ERROR [mkw_rl.rl.train] [env 2] crashed on luigi_circuit_tt (EOFError: ''); env_streak=1/5 track_streak=1/3 — relaunching
+2026-04-23 02:52:12,532 INFO [mkw_rl.env.dolphin_env] [env 2] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:52:12,536 INFO [mkw_rl.env.dolphin_env] [env 2] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:52:12,539 INFO [mkw_rl.env.dolphin_env] [env 2] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin2/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_2.log)
+2026-04-23 02:52:12,540 INFO [mkw_rl.env.dolphin_env] [env 2] listening on :26332 (accept timeout=300s)
+2026-04-23 02:52:14,497 INFO [mkw_rl.env.dolphin_env] [env 2] slave connected
+2026-04-23 02:52:23,867 INFO [mkw_rl.rl.train] ep=150[env=1] track=luigi_circuit_tt return=-6.56 len=231 env_steps=40698 grad_steps=0
+2026-04-23 02:52:36,837 INFO [mkw_rl.rl.train] ep=151[env=0] track=luigi_circuit_tt return=-11.31 len=269 env_steps=41056 grad_steps=0
+2026-04-23 02:52:37,937 INFO [mkw_rl.rl.train] ep=152[env=3] track=luigi_circuit_tt return=-25.84 len=236 env_steps=41081 grad_steps=0
+2026-04-23 02:52:44,537 INFO [mkw_rl.rl.train] ep=153[env=2] track=luigi_circuit_tt return=-23.84 len=239 env_steps=41243 grad_steps=0
+2026-04-23 02:52:57,883 INFO [mkw_rl.rl.train] ep=154[env=1] track=luigi_circuit_tt return=-27.78 len=229 env_steps=41606 grad_steps=0
+2026-04-23 02:53:11,292 INFO [mkw_rl.rl.train] ep=155[env=3] track=luigi_circuit_tt return=-25.92 len=233 env_steps=41981 grad_steps=0
+2026-04-23 02:53:18,135 INFO [mkw_rl.rl.train] ep=156[env=0] track=luigi_circuit_tt return=-10.48 len=268 env_steps=42128 grad_steps=0
+2026-04-23 02:53:19,352 INFO [mkw_rl.rl.train] ep=157[env=2] track=luigi_circuit_tt return=-14.75 len=225 env_steps=42152 grad_steps=0
+2026-04-23 02:53:41,348 INFO [mkw_rl.rl.train] ep=158[env=1] track=luigi_circuit_tt return=-19.98 len=255 env_steps=42709 grad_steps=0
+2026-04-23 02:53:58,601 INFO [mkw_rl.rl.train] ep=159[env=3] track=luigi_circuit_tt return=-14.01 len=275 env_steps=43124 grad_steps=0
+2026-04-23 02:53:59,846 INFO [mkw_rl.rl.train] ep=160[env=2] track=luigi_circuit_tt return=-14.00 len=253 env_steps=43145 grad_steps=0
+2026-04-23 02:54:10,160 INFO [mkw_rl.rl.train] ep=161[env=0] track=luigi_circuit_tt return=-4.20 len=307 env_steps=43379 grad_steps=0
+2026-04-23 02:54:32,816 INFO [mkw_rl.rl.train] ep=162[env=1] track=luigi_circuit_tt return=-8.91 len=313 env_steps=43943 grad_steps=0
+2026-04-23 02:54:34,590 INFO [mkw_rl.rl.train] ep=163[env=3] track=luigi_circuit_tt return=-22.21 len=234 env_steps=43980 grad_steps=0
+2026-04-23 02:54:42,229 INFO [mkw_rl.rl.train] ep=164[env=2] track=luigi_circuit_tt return=-32.94 len=297 env_steps=44176 grad_steps=0
+2026-04-23 02:55:02,926 INFO [mkw_rl.rl.train] ep=165[env=0] track=luigi_circuit_tt return=-9.02 len=283 env_steps=44731 grad_steps=0
+2026-04-23 02:55:07,652 INFO [mkw_rl.rl.train] ep=166[env=1] track=luigi_circuit_tt return=-15.64 len=232 env_steps=44837 grad_steps=0
+2026-04-23 02:55:13,406 INFO [mkw_rl.rl.train] ep=167[env=3] track=luigi_circuit_tt return=-10.67 len=233 env_steps=44957 grad_steps=0
+2026-04-23 02:55:19,442 INFO [mkw_rl.rl.train] ep=168[env=2] track=luigi_circuit_tt return=-15.82 len=234 env_steps=45096 grad_steps=0
+2026-04-23 02:55:44,540 INFO [mkw_rl.rl.train] ep=169[env=0] track=luigi_circuit_tt return=-22.39 len=233 env_steps=45744 grad_steps=0
+2026-04-23 02:55:44,708 INFO [mkw_rl.rl.train] ep=170[env=1] track=luigi_circuit_tt return=-11.94 len=242 env_steps=45749 grad_steps=0
+2026-04-23 02:55:53,075 INFO [mkw_rl.rl.train] ep=171[env=3] track=luigi_circuit_tt return=-12.33 len=244 env_steps=45939 grad_steps=0
+2026-04-23 02:56:05,209 INFO [mkw_rl.rl.train] ep=172[env=2] track=luigi_circuit_tt return=-3.01 len=288 env_steps=46228 grad_steps=0
+2026-04-23 02:56:24,126 INFO [mkw_rl.rl.train] ep=173[env=0] track=luigi_circuit_tt return=-23.15 len=244 env_steps=46678 grad_steps=0
+2026-04-23 02:56:30,072 INFO [mkw_rl.rl.train] ep=174[env=1] track=luigi_circuit_tt return=-1.18 len=242 env_steps=46804 grad_steps=0
+2026-04-23 02:56:37,274 INFO [mkw_rl.rl.train] ep=175[env=3] track=luigi_circuit_tt return=-23.69 len=313 env_steps=46966 grad_steps=0
+2026-04-23 02:57:06,806 INFO [mkw_rl.rl.train] ep=176[env=0] track=luigi_circuit_tt return=-18.54 len=277 env_steps=47757 grad_steps=0
+2026-04-23 02:57:13,405 INFO [mkw_rl.rl.train] ep=177[env=1] track=luigi_circuit_tt return=-13.67 len=277 env_steps=47921 grad_steps=0
+2026-04-23 02:57:25,145 INFO [mkw_rl.rl.train] ep=178[env=3] track=luigi_circuit_tt return=-3.86 len=274 env_steps=48159 grad_steps=0
+2026-04-23 02:57:35,564 INFO [mkw_rl.rl.train] ep=179[env=2] track=luigi_circuit_tt return=-4.79 len=505 env_steps=48400 grad_steps=0
+2026-04-23 02:58:17,888 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=1/5 track_streak=1/3 — relaunching
+2026-04-23 02:58:17,906 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:58:17,908 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:58:17,908 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 02:58:17,909 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 02:58:19,870 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 02:58:31,714 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=2/5 track_streak=2/3 — relaunching
+2026-04-23 02:58:31,730 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:58:31,732 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:58:31,733 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 02:58:31,734 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 02:58:31,873 INFO [mkw_rl.rl.train] ep=180[env=0] track=luigi_circuit_tt return=-0.04 len=469 env_steps=49631 grad_steps=0
+2026-04-23 02:58:33,649 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 02:58:36,208 INFO [mkw_rl.rl.train] ep=181[env=1] track=luigi_circuit_tt return=-26.92 len=469 env_steps=49705 grad_steps=0
+2026-04-23 02:58:48,356 INFO [mkw_rl.rl.train] warmup: replay=49993/200000 (25.0%) env_steps=50001
+2026-04-23 02:58:58,690 INFO [mkw_rl.rl.train] ep=182[env=2] track=luigi_circuit_tt return=-20.65 len=478 env_steps=50254 grad_steps=0
+2026-04-23 02:59:03,991 INFO [mkw_rl.rl.train] ep=183[env=3] track=luigi_circuit_tt return=-21.51 len=246 env_steps=50380 grad_steps=0
+2026-04-23 02:59:12,547 INFO [mkw_rl.rl.train] ep=184[env=0] track=luigi_circuit_tt return=-8.08 len=239 env_steps=50588 grad_steps=0
+2026-04-23 02:59:32,098 INFO [mkw_rl.rl.train] ep=185[env=1] track=luigi_circuit_tt return=0.13 len=282 env_steps=51045 grad_steps=0
+2026-04-23 02:59:40,389 INFO [mkw_rl.rl.train] ep=186[env=3] track=luigi_circuit_tt return=-15.18 len=218 env_steps=51218 grad_steps=0
+2026-04-23 02:59:40,969 INFO [mkw_rl.rl.train] ep=187[env=2] track=luigi_circuit_tt return=-6.11 len=233 env_steps=51229 grad_steps=0
+2026-04-23 02:59:44,854 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=1/5 track_streak=1/3 — relaunching
+2026-04-23 02:59:44,869 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 02:59:44,870 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 02:59:44,871 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 02:59:44,872 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 02:59:46,878 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 03:00:04,805 INFO [mkw_rl.rl.train] ep=188[env=0] track=luigi_circuit_tt return=0.12 len=274 env_steps=51755 grad_steps=0
+2026-04-23 03:00:10,653 INFO [mkw_rl.rl.train] ep=189[env=1] track=luigi_circuit_tt return=-9.33 len=220 env_steps=51909 grad_steps=0
+2026-04-23 03:00:17,231 INFO [mkw_rl.rl.train] ep=190[env=3] track=luigi_circuit_tt return=-11.55 len=245 env_steps=52074 grad_steps=0
+2026-04-23 03:00:42,429 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=1/5 track_streak=1/3 — relaunching
+2026-04-23 03:00:42,454 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 03:00:42,456 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 03:00:42,457 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 03:00:42,458 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 03:00:44,127 INFO [mkw_rl.rl.train] ep=191[env=2] track=luigi_circuit_tt return=-18.89 len=334 env_steps=52662 grad_steps=0
+2026-04-23 03:00:44,364 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 03:00:49,210 INFO [mkw_rl.rl.train] ep=192[env=0] track=luigi_circuit_tt return=-19.92 len=272 env_steps=52753 grad_steps=0
+2026-04-23 03:00:55,689 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=2/5 track_streak=1/3 — relaunching
+2026-04-23 03:00:55,703 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 03:00:55,704 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 03:00:55,705 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 03:00:55,707 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 03:00:57,673 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 03:01:00,701 INFO [mkw_rl.rl.train] ep=193[env=1] track=luigi_circuit_tt return=-2.62 len=267 env_steps=52978 grad_steps=0
+2026-04-23 03:01:05,672 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=3/5 track_streak=1/3 — relaunching
+2026-04-23 03:01:05,688 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 03:01:05,690 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 03:01:05,690 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 03:01:05,691 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 03:01:07,623 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 03:01:20,252 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=4/5 track_streak=2/3 — relaunching
+2026-04-23 03:01:20,269 INFO [mkw_rl.env.dolphin_env] [env 3] 31 track_metadata entries have no savestate (curriculum will not sample these until recorded): ['bowsers_castle_tt', 'coconut_mall_tt', 'daisy_circuit_tt', 'dks_snowboard_cross_tt', 'dry_dry_ruins_tt', 'ds_delfino_square_tt', 'ds_desert_hills_tt', 'ds_peach_gardens_tt', 'ds_yoshi_falls_tt', 'gba_bowser_castle_3_tt', 'gba_shy_guy_beach_tt', 'gcn_dk_mountain_tt', 'gcn_mario_circuit_tt', 'gcn_peach_beach_tt', 'gcn_waluigi_stadium_tt', 'grumble_volcano_tt', 'koopa_cape_tt', 'maple_treeway_tt', 'mario_circuit_tt', 'moo_moo_meadows_tt', 'moonview_highway_tt', 'mushroom_gorge_tt', 'n64_bowsers_castle_tt', 'n64_dks_jungle_parkway_tt', 'n64_mario_raceway_tt', 'n64_sherbet_land_tt', 'rainbow_road_tt', 'snes_ghost_valley_2_tt', 'snes_mario_circuit_3_tt', 'toads_factory_tt', 'warios_gold_mine_tt']
+2026-04-23 03:01:20,273 INFO [mkw_rl.env.dolphin_env] [env 3] forwarding site-packages: /root/mkwii/.venv/lib/python3.13/site-packages
+2026-04-23 03:01:20,273 INFO [mkw_rl.env.dolphin_env] [env 3] launching: /usr/bin/xvfb-run -a /root/mkwii/third_party/Wii-RL/dolphin3/dolphin-emu --batch -C Logger.Options.WriteToConsole=True -C Logger.Logs.SCRIPTING=True --no-python-subinterpreters --script=/root/mkwii/src/mkw_rl/env/dolphin_script.py --exec=/root/mkwii/data/game/mkw.iso (log → runs/btr/dolphin_env_3.log)
+2026-04-23 03:01:20,274 INFO [mkw_rl.env.dolphin_env] [env 3] listening on :26333 (accept timeout=300s)
+2026-04-23 03:01:22,181 INFO [mkw_rl.env.dolphin_env] [env 3] slave connected
+2026-04-23 03:01:24,952 INFO [mkw_rl.rl.train] ep=194[env=2] track=luigi_circuit_tt return=-24.23 len=260 env_steps=53544 grad_steps=0
+2026-04-23 03:01:30,201 ERROR [mkw_rl.rl.train] [env 3] crashed on luigi_circuit_tt (EOFError: ''); env_streak=5/5 track_streak=1/3 — relaunching
+2026-04-23 03:01:30,256 INFO [mkw_rl.rl.train] ep=195[env=0] track=luigi_circuit_tt return=-9.72 len=231 env_steps=53663 grad_steps=0
+2026-04-23 03:01:30,278 INFO [mkw_rl.rl.train] ep=196[env=1] track=luigi_circuit_tt return=-8.45 len=187 env_steps=53664 grad_steps=0
+2026-04-23 03:01:30,380 INFO [mkw_rl.rl.train] ep=197[env=2] track=luigi_circuit_tt return=0.06 len=23 env_steps=53665 grad_steps=0
+2026-04-23 03:01:30,505 INFO [mkw_rl.rl.train] saved checkpoint runs/btr/luigi_4env_20260423_022252_final.pt (grad=0 env=53665)
+Traceback (most recent call last):
+  File "/root/mkwii/scripts/train_btr.py", line 121, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/root/mkwii/scripts/train_btr.py", line 116, in main
+    train(cfg, resume_from=args.resume, run_name=args.run_name)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/mkwii/src/mkw_rl/rl/train.py", line 1534, in train
+    return _train_vector(cfg, agent, logger, run_name)
+  File "/root/mkwii/src/mkw_rl/rl/train.py", line 1481, in _train_vector
+    raise aborted_with_error
+RuntimeError: [env 3] 5 consecutive crashes; aborting
