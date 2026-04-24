@@ -1261,16 +1261,6 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
 # ---------------------------------------------------------------------------
 
 
-# Minimum age (seconds) for an X11/xvfb artifact to be considered "stale".
-# Anything younger than this is assumed to belong to a live xvfb-run — we
-# leave it alone. 60s is well past Dolphin boot (~2s) while tight enough
-# to clean up just-crashed orphans before they accumulate. Originally
-# 300s; tightened after a 4-env resume run hit track_streak=3/3 within
-# 20s when env-3's orphans from the aborted run were still 'live' by
-# the 300s threshold, preventing the fresh X11 cleanup from removing
-# them, which triggered repeated SIGSEGVs on env-3's relaunches.
-_X11_STALE_AGE_S = 60.0
-
 # How often the main training thread re-runs _cleanup_stale_x11_state.
 # Every Dolphin env crash leaves one orphan at /tmp/.X11-unix/XNN and
 # one /tmp/xvfb-run.XXX; at ~20% crash rate across 4 envs, orphans can
@@ -1280,9 +1270,25 @@ _X11_STALE_AGE_S = 60.0
 _X11_CLEANUP_INTERVAL_S = 60.0
 
 
+def _pid_alive(pid: int) -> bool:
+    """True iff a process with this PID currently exists.
+
+    ``os.kill(pid, 0)`` raises ProcessLookupError when the PID is dead
+    and returns silently when alive. Cheap (no fork/exec), reliable on
+    Linux. PermissionError also means the PID exists but we can't signal
+    it — for our purposes that still counts as 'alive, leave it alone'.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _cleanup_stale_x11_state() -> None:
-    """Wipe leftover Xvfb sockets + xvfb-run work dirs older than
-    ``_X11_STALE_AGE_S`` in /tmp.
+    """Wipe orphaned Xvfb sockets + xvfb-run work dirs in /tmp.
 
     Each Dolphin launch picks a fresh X display via ``xvfb-run -a``. When a
     run crashes (common during dev, and inevitable over a multi-hour prod
@@ -1293,45 +1299,111 @@ def _cleanup_stale_x11_state() -> None:
     silently during the first ``reset()`` — crashing every subsequent
     relaunch until the orphans are cleaned.
 
-    Liveness protection: we only touch artifacts whose mtime is older than
-    ``_X11_STALE_AGE_S`` seconds. Anything newer probably belongs to a live
-    process (a concurrent ``train()`` invocation, a live ``eval_btr.py``
-    rollout, the user's own Xvfb session on a shared dev box). Without
-    this guard, running eval alongside a live trainer would nuke the
-    trainer's X socket and SIGSEGV all its envs.
+    Liveness check: we parse ``/tmp/.XNN-lock`` for each display — Xvfb
+    writes its own PID there on startup. If the PID is alive, the socket
+    is in use; skip it. If the PID is dead (or the lock doesn't exist),
+    the socket is a genuine orphan and safe to delete.
+
+    (Earlier version used mtime < 60s as a proxy. That was wrong: Xvfb
+    doesn't touch its socket's mtime after creation, so a socket for a
+    running env that's been up >60s becomes indistinguishable from a
+    stale orphan. At multi-hour prod scale this silently murders live
+    envs. PID-based liveness is the correct invariant.)
 
     Linux-only; no-op elsewhere so macOS dev machines aren't affected.
     """
     if platform.system() != "Linux":
         return
     import glob  # noqa: PLC0415
-    now = time.time()
+    import re  # noqa: PLC0415
+
     removed = 0
     skipped_live = 0
-    for pattern in ("/tmp/.X11-unix/X*", "/tmp/.X*-lock", "/tmp/xvfb-run.*"):
-        for p in glob.glob(pattern):
-            try:
-                age = now - os.path.getmtime(p)
-            except OSError:
-                # File disappeared between glob and stat — nothing to do.
-                continue
-            if age < _X11_STALE_AGE_S:
-                skipped_live += 1
-                continue
-            try:
-                if os.path.isdir(p):
-                    import shutil  # noqa: PLC0415
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    os.unlink(p)
-                removed += 1
-            except OSError:
-                # Permission denied / already gone.
-                pass
+
+    # Pass 1: X sockets + lock files. Lock file name is `.X<N>-lock` and its
+    # first line is the owning PID. Socket is `X<N>` under /tmp/.X11-unix.
+    # Build a live-display set from the locks first; anything not in it
+    # is orphaned. Regex matches the basename so tests with rewritten
+    # /tmp/... paths still work.
+    lock_re = re.compile(r"\.X(\d+)-lock$")
+    sock_re = re.compile(r"X(\d+)$")
+
+    live_displays: set[str] = set()
+    for lock_path in glob.glob("/tmp/.X*-lock"):
+        m = lock_re.search(lock_path)
+        if m is None:
+            continue
+        display = m.group(1)
+        try:
+            pid_str = open(lock_path).read().strip().split()[0]  # noqa: SIM115
+            pid = int(pid_str)
+        except (OSError, ValueError, IndexError):
+            # Malformed lock file — treat the display as dead.
+            pid = -1
+        if pid > 0 and _pid_alive(pid):
+            live_displays.add(display)
+
+    # Delete lock files whose PID is dead.
+    for lock_path in glob.glob("/tmp/.X*-lock"):
+        m = lock_re.search(lock_path)
+        if m is None:
+            continue
+        if m.group(1) in live_displays:
+            skipped_live += 1
+            continue
+        try:
+            os.unlink(lock_path)
+            removed += 1
+        except OSError:
+            pass
+
+    # Delete X sockets whose display isn't in the live set.
+    for sock_path in glob.glob("/tmp/.X11-unix/X*"):
+        m = sock_re.search(sock_path)
+        if m is None:
+            continue
+        if m.group(1) in live_displays:
+            skipped_live += 1
+            continue
+        try:
+            os.unlink(sock_path)
+            removed += 1
+        except OSError:
+            pass
+
+    # Pass 2: xvfb-run scratch dirs. These don't have a PID marker we can
+    # parse, but they pair 1:1 with an X display — xvfb-run creates the
+    # socket first, then keeps a reference in the scratch dir. If the
+    # display isn't live, the scratch dir is safe to clean up.
+    # Fallback: any xvfb-run dir older than ~10 min with no live process
+    # holding it is almost certainly orphaned (rough mtime-based heuristic
+    # only for these dirs since they have no direct PID to check).
+    for p in glob.glob("/tmp/xvfb-run.*"):
+        if not os.path.isdir(p):
+            continue
+        try:
+            age = time.time() - os.path.getmtime(p)
+        except OSError:
+            continue
+        # 10 min is well past any reasonable Dolphin boot + a few minutes
+        # of slack. Xvfb-run dir stays around as long as Xvfb does; when
+        # Xvfb dies, the dir is orphan within seconds. A conservative 10 min
+        # ensures we don't touch a just-starting Dolphin while still
+        # keeping the orphan-clearance rate high enough over a multi-hour run.
+        if age < 600.0:
+            skipped_live += 1
+            continue
+        try:
+            import shutil  # noqa: PLC0415
+            shutil.rmtree(p, ignore_errors=True)
+            removed += 1
+        except OSError:
+            pass
+
     if removed or skipped_live:
         log.info(
-            "X11/xvfb cleanup: removed %d stale, skipped %d live (age<%.0fs)",
-            removed, skipped_live, _X11_STALE_AGE_S,
+            "X11/xvfb cleanup: removed %d orphans, skipped %d live",
+            removed, skipped_live,
         )
 
 

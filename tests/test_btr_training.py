@@ -1466,80 +1466,113 @@ runtime:
 
 class TestCleanupStaleX11State:
     """Coverage for _cleanup_stale_x11_state — the fix for the Vast.ai
-    Dolphin-SIGSEGV-after-10-orphans issue. Without this, the function
-    could silently break on a future refactor of the glob patterns."""
+    Dolphin-SIGSEGV-after-10-orphans issue. The new liveness check reads
+    the owning PID out of ``/tmp/.X<N>-lock`` and checks via ``os.kill(pid, 0)``
+    whether that process is alive, rather than the (broken) mtime-based
+    heuristic it replaced."""
 
     @staticmethod
     def _age_paths(paths: list[Path], age_seconds: float) -> None:
-        """Backdate mtime on a set of paths so the liveness guard considers
-        them stale. Needed because the helper's liveness threshold is 300s;
-        fresh fixtures are treated as live unless aged explicitly."""
+        """Backdate mtime — used for xvfb-run dirs, which still use a
+        10-min mtime heuristic (no PID file to parse)."""
         import os as _os
         import time as _time
         target = _time.time() - age_seconds
         for p in paths:
             _os.utime(p, (target, target))
 
-    def test_removes_x11_sockets_and_lock_and_xvfb_dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        import platform as _platform
-
+    def test_removes_sockets_for_dead_pids_keeps_live_ones(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """X sockets whose lock-file PID is a dead process get removed.
+        Sockets whose PID is alive get preserved regardless of mtime.
+        This is the critical invariant: Xvfb doesn't touch its socket's
+        mtime during normal operation, so mtime alone can't distinguish
+        live from dead."""
+        import os as _os
         from mkw_rl.rl.train import _cleanup_stale_x11_state
 
-        # Redirect the hardcoded /tmp paths in the helper via a fake root.
-        # Simulates the Vast /tmp directory structure.
         fake_tmp = tmp_path / "tmp"
         (fake_tmp / ".X11-unix").mkdir(parents=True)
-        (fake_tmp / ".X11-unix" / "X142").write_bytes(b"")
-        (fake_tmp / ".X11-unix" / "X148").write_bytes(b"")
-        (fake_tmp / ".X148-lock").write_bytes(b"12345\n")
-        (fake_tmp / "xvfb-run.abc123").mkdir()
-        (fake_tmp / "xvfb-run.abc123" / "Xauthority").write_bytes(b"")
-        (fake_tmp / "xvfb-run.xyz789").mkdir()
-        # Decoy files that should NOT be touched.
-        (fake_tmp / "unrelated.txt").write_bytes(b"keep me")
-        (fake_tmp / ".X11-unix" / "README").write_bytes(b"not a socket")
 
-        # Age all the X11/xvfb fixtures past the liveness threshold (300s)
-        # so the liveness guard classifies them as stale. If we don't age
-        # them, the newly-created test files are "live" and the guard
-        # correctly skips them (see test_preserves_live_artifacts).
-        self._age_paths(
-            [
-                fake_tmp / ".X11-unix" / "X142",
-                fake_tmp / ".X11-unix" / "X148",
-                fake_tmp / ".X148-lock",
-                fake_tmp / "xvfb-run.abc123",
-                fake_tmp / "xvfb-run.xyz789",
-            ],
-            age_seconds=600,
-        )
+        # Live display: lock points at our own PID (definitely alive).
+        live_sock = fake_tmp / ".X11-unix" / "X142"
+        live_lock = fake_tmp / ".X142-lock"
+        live_sock.write_bytes(b"")
+        live_lock.write_text(f"{_os.getpid()}\n")
+
+        # Dead display: lock points at an astronomically unlikely PID (2M).
+        # os.kill(2000000, 0) on a real system will raise ProcessLookupError.
+        dead_sock = fake_tmp / ".X11-unix" / "X148"
+        dead_lock = fake_tmp / ".X148-lock"
+        dead_sock.write_bytes(b"")
+        dead_lock.write_text("2000000\n")
+
+        # Socket with no lock file at all → treat as dead orphan.
+        orphan_sock = fake_tmp / ".X11-unix" / "X200"
+        orphan_sock.write_bytes(b"")
+
+        # Decoy non-socket file in .X11-unix/ — must not be touched
+        # (doesn't match the X<digits> regex).
+        readme = fake_tmp / ".X11-unix" / "README"
+        readme.write_bytes(b"not a socket")
 
         import mkw_rl.rl.train as train_mod
         original_glob = __import__("glob").glob
 
         def patched_glob(pattern: str) -> list[str]:
-            # Rewrite /tmp/... patterns to fake_tmp/... during this test.
             if pattern.startswith("/tmp/"):
                 pattern = str(fake_tmp / pattern[len("/tmp/"):])
             return original_glob(pattern)
 
-        # Also pin platform.system() to Linux so the function doesn't no-op
-        # when the test host is macOS. The helper imports glob locally so
-        # we patch the stdlib module's global entry point.
         monkeypatch.setattr(train_mod.platform, "system", lambda: "Linux")
         monkeypatch.setattr("glob.glob", patched_glob)
 
         _cleanup_stale_x11_state()
 
-        # X sockets + lock + xvfb-run dirs should all be gone.
-        assert not (fake_tmp / ".X11-unix" / "X142").exists()
-        assert not (fake_tmp / ".X11-unix" / "X148").exists()
-        assert not (fake_tmp / ".X148-lock").exists()
-        assert not (fake_tmp / "xvfb-run.abc123").exists()
-        assert not (fake_tmp / "xvfb-run.xyz789").exists()
-        # Decoys preserved.
-        assert (fake_tmp / "unrelated.txt").read_bytes() == b"keep me"
-        assert (fake_tmp / ".X11-unix" / "README").read_bytes() == b"not a socket"
+        # Live PID → socket + lock preserved.
+        assert live_sock.exists(), "live-PID X socket must not be deleted"
+        assert live_lock.exists(), "live-PID lock file must not be deleted"
+        # Dead PID → both removed.
+        assert not dead_sock.exists(), "dead-PID X socket should be removed"
+        assert not dead_lock.exists(), "dead-PID lock file should be removed"
+        # No-lock socket → removed (treated as orphan).
+        assert not orphan_sock.exists()
+        # Decoys untouched.
+        assert readme.read_bytes() == b"not a socket"
+
+    def test_removes_stale_xvfb_run_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """xvfb-run scratch dirs still use mtime (no PID marker), so test
+        a fresh dir is preserved and an aged one is removed."""
+        from mkw_rl.rl.train import _cleanup_stale_x11_state
+
+        fake_tmp = tmp_path / "tmp"
+        (fake_tmp / ".X11-unix").mkdir(parents=True)
+        fresh_dir = fake_tmp / "xvfb-run.fresh"
+        fresh_dir.mkdir()
+        (fresh_dir / "Xauthority").write_bytes(b"")
+
+        stale_dir = fake_tmp / "xvfb-run.stale"
+        stale_dir.mkdir()
+        self._age_paths([stale_dir], age_seconds=900)  # 15 min
+
+        import mkw_rl.rl.train as train_mod
+        original_glob = __import__("glob").glob
+
+        def patched_glob(pattern: str) -> list[str]:
+            if pattern.startswith("/tmp/"):
+                pattern = str(fake_tmp / pattern[len("/tmp/"):])
+            return original_glob(pattern)
+
+        monkeypatch.setattr(train_mod.platform, "system", lambda: "Linux")
+        monkeypatch.setattr("glob.glob", patched_glob)
+
+        _cleanup_stale_x11_state()
+
+        assert fresh_dir.exists(), "fresh xvfb-run dir must be preserved"
+        assert not stale_dir.exists(), "15-min-old xvfb-run dir should be removed"
 
     def test_noop_on_non_linux(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """On macOS dev machines the helper must not touch anything —
@@ -1564,30 +1597,28 @@ class TestCleanupStaleX11State:
         _cleanup_stale_x11_state()
         assert call_count[0] == 0, "helper should no-op on non-Linux"
 
-    def test_preserves_live_artifacts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Artifacts with mtime younger than _X11_STALE_AGE_S (= 300s) must
-        be PRESERVED. Without this guard, running eval_btr or a second
-        train() instance on a shared box would nuke the X sockets of the
-        live job and SIGSEGV all its envs."""
-        import mkw_rl.rl.train as train_mod
+    def test_preserves_long_lived_sockets_with_live_pid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The previous mtime-based implementation had a fatal flaw:
+        Xvfb doesn't touch its socket after creation, so after 60s of
+        normal operation the socket was indistinguishable from a 60s-old
+        orphan and got deleted — killing the live env. This test locks
+        that regression out by explicitly aging a live-PID socket past
+        the old 60s threshold and asserting it survives."""
+        import os as _os
         from mkw_rl.rl.train import _cleanup_stale_x11_state
 
         fake_tmp = tmp_path / "tmp"
         (fake_tmp / ".X11-unix").mkdir(parents=True)
-        # Fresh (just-created) artifacts — their mtimes are 'now'.
-        live_socket = fake_tmp / ".X11-unix" / "X300"
-        live_socket.write_bytes(b"")
-        live_lock = fake_tmp / ".X300-lock"
-        live_lock.write_bytes(b"99999\n")
-        live_dir = fake_tmp / "xvfb-run.liveABCD"
-        live_dir.mkdir()
+        sock = fake_tmp / ".X11-unix" / "X42"
+        lock = fake_tmp / ".X42-lock"
+        sock.write_bytes(b"")
+        lock.write_text(f"{_os.getpid()}\n")
+        # Age both well past the old 60s mtime threshold.
+        self._age_paths([sock, lock], age_seconds=3600)
 
-        # An aged artifact that SHOULD be removed, to prove the function
-        # is doing something rather than no-op'ing entirely.
-        stale_socket = fake_tmp / ".X11-unix" / "X100"
-        stale_socket.write_bytes(b"")
-        self._age_paths([stale_socket], age_seconds=600)
-
+        import mkw_rl.rl.train as train_mod
         original_glob = __import__("glob").glob
 
         def patched_glob(pattern: str) -> list[str]:
@@ -1597,15 +1628,10 @@ class TestCleanupStaleX11State:
 
         monkeypatch.setattr(train_mod.platform, "system", lambda: "Linux")
         monkeypatch.setattr("glob.glob", patched_glob)
-
         _cleanup_stale_x11_state()
 
-        # Live-age artifacts preserved.
-        assert live_socket.exists(), "fresh X socket should not be deleted"
-        assert live_lock.exists(), "fresh lock file should not be deleted"
-        assert live_dir.exists(), "fresh xvfb-run dir should not be deleted"
-        # Stale one removed (proves function executed and is working).
-        assert not stale_socket.exists(), "600s-old stale X socket should be removed"
+        assert sock.exists(), "1-hour-old live-PID socket must survive"
+        assert lock.exists(), "1-hour-old live-PID lock must survive"
 
 
 class TestTrainBtrCli:
