@@ -39,6 +39,7 @@ the full list (items 7-15) with paper references.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import csv
 import logging
@@ -711,6 +712,11 @@ class BTRAgent:
 
         Returns scalar metrics for logging (loss, td abs mean, grad norm, etc.).
         No-op if replay hasn't warmed up yet.
+
+        Forward passes run under ``torch.autocast(bfloat16)`` — halves
+        activation memory for the backward graph compared to pure fp32.
+        bfloat16 shares fp32's exponent range so we don't need GradScaler.
+        Backward + optimizer step stay in fp32 (parameters + Adam moments).
         """
         if self.replay.capacity < self.cfg.min_sampling_size:
             return {}
@@ -737,58 +743,77 @@ class BTRAgent:
         # (disable_noise at build + sync); do NOT reset_noise() on target here.
         self.online_net.reset_noise()
 
-        # Burn-in forward on online + target. No grad; warms up the LSTM hidden.
-        # Target burns in on n_states so its hidden corresponds to n_states[:, burn_in]
-        # — this is the state the learning-window target forward actually consumes.
-        with torch.no_grad():
-            _, _, hidden_online = self.online_net(burn_states)
-            _, _, hidden_target = self.target_net(burn_n_states)
-
-        # Learning-window forward on online (with grad).
-        online_quantiles_seq, online_taus_seq, _ = self.online_net(
-            learn_states, hidden=hidden_online
+        # bfloat16 mixed precision for forward + loss. Halves activation
+        # memory vs pure fp32 — critical at bs=128 × seq_len=60 on the
+        # 3-layer (32/64/64) encoder, which otherwise needs ~30 GB of
+        # backward-graph activations. Only apply on CUDA; CPU autocast
+        # is fp16 / bf16 quality-dependent and we don't need it there.
+        use_amp = self.device.type == "cuda"
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if use_amp else contextlib.nullcontext()
         )
-        # (B, T, num_tau, n_actions), (B, T, num_tau, 1)
 
-        # Target net forward on n-state sequence (no grad).
-        with torch.no_grad():
-            target_quantiles_seq, _, _ = self.target_net(
-                learn_n_states, hidden=hidden_target
+        with amp_ctx:
+            # Burn-in forward on online + target. No grad; warms up the LSTM hidden.
+            # Target burns in on n_states so its hidden corresponds to n_states[:, burn_in]
+            # — this is the state the learning-window target forward actually consumes.
+            with torch.no_grad():
+                _, _, hidden_online = self.online_net(burn_states)
+                _, _, hidden_target = self.target_net(burn_n_states)
+
+            # Learning-window forward on online (with grad).
+            online_quantiles_seq, online_taus_seq, _ = self.online_net(
+                learn_states, hidden=hidden_online
+            )
+            # (B, T, num_tau, n_actions), (B, T, num_tau, 1)
+
+            # Target net forward on n-state sequence (no grad).
+            with torch.no_grad():
+                target_quantiles_seq, _, _ = self.target_net(
+                    learn_n_states, hidden=hidden_target
+                )
+
+            # Flatten (B, T) → (B*T) so per-timestep loss math mirrors the
+            # original single-step pattern in VIPTankz. Done inside autocast
+            # so the reshape produces bf16 views consistent with the upstream
+            # forward — saves a subtle fp32 cast on the loss inputs.
+            B, T = learn_actions.shape
+            online_q_flat = online_quantiles_seq.reshape(B * T, self.cfg.num_tau, -1)
+            online_taus_flat = online_taus_seq.reshape(B * T, self.cfg.num_tau, 1)
+            target_q_flat = target_quantiles_seq.reshape(B * T, self.cfg.num_tau, -1)
+            actions_flat = learn_actions.reshape(B * T)
+            rewards_flat = learn_rewards.reshape(B * T)
+            dones_flat = learn_dones.reshape(B * T, 1, 1)
+            # Broadcast per-sequence weights across T so each element gets the same weight.
+            weights_flat = weights.unsqueeze(1).expand(-1, T).reshape(B * T)
+
+            # Munchausen reward (needs online Q at current state, detached).
+            munch_reward = _compute_munchausen_reward(
+                online_q_flat.detach(),
+                rewards_flat,
+                actions_flat,
+                self.cfg.entropy_tau,
+                self.cfg.munch_alpha,
+                self.cfg.munch_lo,
             )
 
-        # Flatten (B, T) → (B*T) so per-timestep loss math mirrors the
-        # original single-step pattern in VIPTankz.
-        B, T = learn_actions.shape
-        online_q_flat = online_quantiles_seq.reshape(B * T, self.cfg.num_tau, -1)
-        online_taus_flat = online_taus_seq.reshape(B * T, self.cfg.num_tau, 1)
-        target_q_flat = target_quantiles_seq.reshape(B * T, self.cfg.num_tau, -1)
-        actions_flat = learn_actions.reshape(B * T)
-        rewards_flat = learn_rewards.reshape(B * T)
-        dones_flat = learn_dones.reshape(B * T, 1, 1)
-        # Broadcast per-sequence weights across T so each element gets the same weight.
-        weights_flat = weights.unsqueeze(1).expand(-1, T).reshape(B * T)
+            loss, td_abs_flat = _compute_td_error_and_loss(
+                online_q_flat,
+                online_taus_flat,
+                target_q_flat,
+                actions_flat,
+                munch_reward,
+                gamma_n=self.cfg.gamma**self.cfg.n_step,
+                dones=dones_flat,
+                weights=weights_flat,
+                entropy_tau=self.cfg.entropy_tau,
+            )
 
-        # Munchausen reward (needs online Q at current state, detached).
-        munch_reward = _compute_munchausen_reward(
-            online_q_flat.detach(),
-            rewards_flat,
-            actions_flat,
-            self.cfg.entropy_tau,
-            self.cfg.munch_alpha,
-            self.cfg.munch_lo,
-        )
-
-        loss, td_abs_flat = _compute_td_error_and_loss(
-            online_q_flat,
-            online_taus_flat,
-            target_q_flat,
-            actions_flat,
-            munch_reward,
-            gamma_n=self.cfg.gamma**self.cfg.n_step,
-            dones=dones_flat,
-            weights=weights_flat,
-            entropy_tau=self.cfg.entropy_tau,
-        )
+        # loss comes back in bf16 from autocast; cast to fp32 for the
+        # isfinite check and backward so the optimizer sees fp32 grads.
+        if use_amp:
+            loss = loss.float()
 
         # NaN/inf guard: entropy_tau=0.03 + outlier Q can overflow logsumexp.
         # Skip the step rather than poisoning weights with a NaN Adam moment.
