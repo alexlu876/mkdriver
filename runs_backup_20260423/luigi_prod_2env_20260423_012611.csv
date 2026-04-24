@@ -1,3 +1,0 @@
-step,episode/return,episode/length,track/luigi_circuit_tt/episode_return,track/luigi_circuit_tt/episode_length,env_steps,grad_steps,replay/capacity,replay/fill_ratio,env/id,reward/checkpoint,reward/offroad,reward/wall,reward/finish,reward/position,reward/total,track_sampler/luigi_circuit_tt/weight
-437,-5.279105289210445,221,-5.279105289210445,221,437,0,435,0.002175,0,0.07089471078955609,0.0,-5.3500000000000005,0.0,0.0,-5.279105289210445,1.0
-488,-8.05702851187665,238,-8.05702851187665,238,488,0,486,0.00243,1,0.0929714881233547,0.0,-8.150000000000004,0.0,0.0,-8.05702851187665,1.0
