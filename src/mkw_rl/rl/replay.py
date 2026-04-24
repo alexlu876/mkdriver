@@ -9,10 +9,13 @@ Two classes:
 - ``PER``: prioritized replay buffer with frame-stacking and n-step returns.
   Stores raw frames once and indexes into them via a pointer table —
   significantly reduces memory vs storing stacked frames per transition.
-  Handles multi-env rollouts via ``stream`` IDs. Exposes two samplers:
-  ``sample()`` for transition-level Q-learning and ``sample_sequences()``
-  for R2D2-style recurrent replay (added in pass 3). Both share storage
-  and SumTree priorities.
+  Handles multi-env rollouts via ``stream`` IDs. Exposes a single sampler
+  ``sample(batch_size)`` that returns transitions with the LSTM hidden
+  state the agent consumed at that timestep (stored-hidden replay;
+  Hausknecht & Stone 2015, R2D2 "stored state" variant). Each transition
+  carries the (h, c) the agent used when acting — at learn time we
+  forward the transition with that stored hidden instead of burning in
+  through a long sequence prefix.
 
 Ported from ``~/code/mkw/Wii-RL/BTR.py:311-733``. Algorithm preserved
 line-by-line; only formatting, type hints, 4-space indent (the original
@@ -51,11 +54,13 @@ the 2026-04-21 forensic audit of VIPTankz/Wii-RL for full analysis.
    we err generous. Configurable via constructor.
 
 .. note::
-    Pass 3 (2026-04-21) added ``sample_sequences(batch_size, seq_len)``
-    for R2D2-style recurrent replay. The existing ``sample()`` is kept
-    as-is so a non-recurrent agent could still use this buffer. The
-    two methods share storage and sumtree priorities but differ in
-    what they return.
+    2026-04-23 memory refactor: ``sample_sequences()`` (R2D2 recurrent
+    replay with burn-in) was removed. It allocated ``(B, T, stack, H, W)``
+    batches that scaled encoder activation memory by ``seq_len``, making
+    BTR OOM on 32 GB GPUs. Replaced with single-transition ``sample()``
+    that returns stored LSTM hidden states alongside each transition,
+    paying a small representational-drift penalty (Kapturowski 2019 §4)
+    in exchange for VIPTankz-equivalent memory.
 """
 
 from __future__ import annotations
@@ -187,9 +192,11 @@ class PER:
     its own pending window; the buffer stores individual frames in
     ``state_mem`` and writes transition pointers into ``pointer_mem``.
 
-    This is VIPTankz's v1 transition-based implementation. Pass 3 extends
-    with ``sample_sequences()`` for R2D2 recurrent replay; the transition-
-    based ``sample()`` below stays as the fallback/reference path.
+    This is VIPTankz's v1 transition-based implementation. 2026-04-23 adds
+    per-transition LSTM hidden-state storage (``h_mem`` / ``c_mem``) so
+    ``sample()`` returns not just the transition but the ``(h, c)`` the
+    rollout agent consumed at that timestep — see module docstring
+    "stored-hidden replay" for why.
     """
 
     def __init__(
@@ -206,6 +213,8 @@ class PER:
         imagey: int = 84,
         rgb: bool = False,
         storage_size_multiplier: float = 1.75,  # VIPTankz default 1.25; bumped for MKWii
+        lstm_hidden: int = 512,
+        lstm_layers: int = 1,
     ) -> None:
         self.st = SumTree(size)
         self.data = [None for _ in range(size)]
@@ -267,6 +276,23 @@ class PER:
         self.done_mem = np.zeros(self.storage_size, dtype=bool)
         self.trun_mem = np.zeros(self.storage_size, dtype=bool)
 
+        # LSTM hidden/cell state storage — one pair per transition, indexed by
+        # reward_mem_idx (same slot as action/reward/done). fp16 keeps the
+        # memory budget small: at lstm_hidden=512, 1.75M slots × 512 × 2 bytes
+        # × 2 (h + c) = 3.58 GB. Compare to state_mem at 19 GB. These are
+        # the hidden states the ACTING agent consumed to produce the stored
+        # action. At learn time we forward with these as the LSTM init, so
+        # no burn-in is needed. Matches the "stored state" variant in
+        # Kapturowski 2019 §2.3 (R2D2 paper).
+        self.lstm_hidden = lstm_hidden
+        self.lstm_layers = lstm_layers
+        self.h_mem = np.zeros(
+            (self.storage_size, self.lstm_layers, self.lstm_hidden), dtype=np.float16
+        )
+        self.c_mem = np.zeros(
+            (self.storage_size, self.lstm_layers, self.lstm_hidden), dtype=np.float16
+        )
+
         # pointer_mem: each entry holds indices into state_mem for the stack
         # and n_stack, plus indices into reward_mem for the n-step reward window.
         self.trans_dtype = np.dtype(
@@ -302,9 +328,18 @@ class PER:
         done: bool,
         trun: bool,
         stream: int,
+        hidden: tuple[np.ndarray, np.ndarray] | None = None,
         prio: bool = True,
     ) -> None:
-        self.append_memory(state, action, reward, n_state, done, trun, stream)
+        """Append a transition.
+
+        ``hidden`` is the ``(h, c)`` LSTM state the agent CONSUMED to produce
+        ``action`` (not the state produced after). Each array is shaped
+        ``(lstm_layers, lstm_hidden)`` on CPU (any float dtype; cast to fp16
+        on store). Pass ``None`` for the first transition of an episode
+        (LSTM init from zeros) — it gets stored as zeros.
+        """
+        self.append_memory(state, action, reward, n_state, done, trun, stream, hidden)
         self.append_pointer(stream, prio)
 
         if done or trun:
@@ -379,6 +414,7 @@ class PER:
         done: bool,
         trun: bool,
         stream: int,
+        hidden: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> None:
         if self.last_terminal[stream]:
             # Start a fresh episode — write the whole frame stack + next frame.
@@ -396,6 +432,7 @@ class PER:
             self.reward_mem[self.reward_mem_idx] = reward
             self.done_mem[self.reward_mem_idx] = done
             self.trun_mem[self.reward_mem_idx] = trun
+            self._write_hidden(self.reward_mem_idx, hidden)
 
             self.reward_buffer[stream].append(self.reward_mem_idx)
             self.reward_mem_idx = (self.reward_mem_idx + 1) % self.storage_size
@@ -411,18 +448,47 @@ class PER:
             self.reward_mem[self.reward_mem_idx] = reward
             self.done_mem[self.reward_mem_idx] = done
             self.trun_mem[self.reward_mem_idx] = trun
+            self._write_hidden(self.reward_mem_idx, hidden)
 
             self.reward_buffer[stream].append(self.reward_mem_idx)
             self.reward_mem_idx = (self.reward_mem_idx + 1) % self.storage_size
+
+    def _write_hidden(
+        self, idx: int, hidden: tuple[np.ndarray, np.ndarray] | None
+    ) -> None:
+        """Write (h, c) at ``idx`` in the hidden-state pool. ``None`` writes zeros
+        (first transition of an episode).
+
+        Indexing contract (load-bearing for ``sample()``): we write at the
+        same slot (``reward_mem_idx``) that ``action_mem`` / ``reward_mem`` /
+        ``done_mem`` are written to. ``append_pointer`` then records the
+        n-step reward-window indices into ``pointer_mem[...].reward``, with
+        ``reward[0]`` being THIS slot. At sample time, ``action_pointers =
+        p[2][0]`` resolves back to this same slot, so ``h_mem[action_pointers]``
+        retrieves the hidden consumed for the window's first action.
+        Re-ordering how ``append_memory`` / ``append_pointer`` sequence their
+        writes would silently break this invariant.
+        """
+        if hidden is None:
+            self.h_mem[idx] = 0
+            self.c_mem[idx] = 0
+            return
+        h, c = hidden
+        self.h_mem[idx] = h
+        self.c_mem[idx] = c
 
     # -------- sample path --------
 
     def sample(self, batch_size: int, count: int = 0):
         """Sample ``batch_size`` transitions with prioritized stratified sampling.
 
-        Returns (tree_idxs, states, actions, rewards, n_states, dones, weights)
-        where states/n_states are on ``self.device`` as float32 uint8-cast-to-
-        float, and rewards/dones/actions are device tensors of appropriate dtype.
+        Returns ``(tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens)``
+        where states/n_states are uint8 on ``self.device`` (BTRPolicy normalizes
+        internally), rewards/dones/actions are device tensors of appropriate
+        dtype, and ``hiddens`` is a ``(h, c)`` tuple with each entry shaped
+        ``(lstm_layers, B, lstm_hidden)`` in float32 on device — the LSTM
+        init to use for the single-step forward. See module docstring
+        "stored-hidden replay" for rationale.
 
         Raises ``RuntimeError`` if called on an empty buffer.
         """
@@ -488,228 +554,28 @@ class PER:
                 raise RuntimeError("PER sample() produced NaN weights after retries")
             return self.sample(batch_size, count + 1)
 
-        states = states.to(torch.float32).to(self.device)
-        n_states = n_states.to(torch.float32).to(self.device)
+        # Keep frames as uint8 on device — BTRPolicy.forward does the
+        # .float()/255 conversion internally. Casting to float32 here would
+        # quadruple GPU memory for the batch staging tensors (uint8 → fp32)
+        # for no benefit; see the 2026-04-23 memory audit.
+        states = states.to(self.device)
+        n_states = n_states.to(self.device)
         rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
         dones = torch.tensor(dones, dtype=torch.bool, device=self.device)
         actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
 
-        return tree_idxs, states, actions, rewards, n_states, dones, weights
+        # Stored-hidden lookup. h_mem/c_mem are (storage_size, lstm_layers,
+        # lstm_hidden) fp16; the batch lookup returns (B, lstm_layers,
+        # lstm_hidden). Transpose to the nn.LSTM-native layout
+        # (lstm_layers, B, lstm_hidden) and upcast to fp32 since the
+        # network runs in fp32 (or bf16 via autocast, which handles the cast).
+        h_batch = self.h_mem[action_pointers]  # (B, L, H) fp16
+        c_batch = self.c_mem[action_pointers]
+        h_t = torch.tensor(h_batch, dtype=torch.float32, device=self.device).transpose(0, 1)
+        c_t = torch.tensor(c_batch, dtype=torch.float32, device=self.device).transpose(0, 1)
+        hiddens = (h_t.contiguous(), c_t.contiguous())
 
-    def sample_sequences(
-        self,
-        batch_size: int,
-        seq_len: int,
-        count: int = 0,
-    ):
-        """R2D2-style recurrent sampling.
-
-        Returns ``batch_size`` sequences of length ``seq_len``, each element
-        being an n-step transition (framestack → action → n-step discounted
-        reward → n-step-later framestack → done-within-window flag). The
-        training loop splits each sequence into burn-in (no-grad forward to
-        warm up the LSTM hidden state) and learning-window (with-grad loss
-        target) per the R2D2 recipe.
-
-        Storage is shared with ``sample()``; start indices are picked from
-        the same SumTree priority distribution. A sequence is rejected if
-        its window would cross the circular buffer's write head (meaning
-        part of the sequence is from the current rollout and part is from
-        the previous lap of the buffer — i.e., stale / broken trajectory).
-        Up to 5 rejection retries before raising.
-
-        Priority update contract
-        ------------------------
-        R2D2 paper §2.3 eq. 1 specifies sequence priority as
-        ``p = η · max_t|δ_t| + (1-η) · mean_t|δ_t|`` with ``η = 0.9``.
-        Since ``update_priorities`` takes a scalar per sequence and our
-        sampler uses transition-level SumTree priorities indexed by the
-        sequence START position, the training loop is expected to
-        aggregate its ``(B, T)`` per-timestep TD errors into ``(B,)``
-        with the above formula (or a documented alternative) before
-        calling ``update_priorities(tree_idxs, aggregated)``. A naive
-        ``mean(dim=1)`` works but silently deviates from R2D2.
-
-        Approximation vs canonical R2D2
-        --------------------------------
-        R2D2 stores *sequence-level* priorities. We use the existing
-        transition-level SumTree (shared with ``sample()``) and index
-        by the sequence's START transition. Effect: transitions that
-        have never been a start get the buffer's default max priority
-        and are oversampled as sequence starts until hit once. In
-        practice this self-corrects quickly; flag in case any future
-        A/B test reveals a meaningful difference vs a dedicated
-        sequence-priority tree.
-
-        Returns
-        -------
-        tree_idxs : (B,) numpy int array
-            SumTree indices of the sequence START positions — for
-            update_priorities() per the contract above.
-        states : (B, T, framestack, H, W) float32 on device
-        actions : (B, T) int64 on device
-        rewards : (B, T) float32 on device — n-step discounted return at each t
-        n_states : (B, T, framestack, H, W) float32 on device — framestack at
-            t+n_step for Q-target bootstrap
-        dones : (B, T) bool on device — whether a terminal occurred within
-            the n-step window starting at t
-        weights : (B,) float32 on device — PER IS weights for the start idx
-
-        Parameters
-        ----------
-        batch_size : int
-        seq_len : int
-            Full sequence length; the training loop decides the burn-in /
-            learning-window split.
-        """
-        if self.capacity == 0:
-            raise RuntimeError("PER.sample_sequences() called on empty buffer (capacity=0)")
-        if seq_len < 1:
-            raise ValueError(f"seq_len must be >= 1, got {seq_len}")
-        if seq_len > self.capacity:
-            raise ValueError(
-                f"seq_len={seq_len} exceeds buffer capacity={self.capacity}; "
-                "train longer before sampling this seq_len"
-            )
-
-        p_total = self.st.total()
-
-        # Stratified sampling over the priority distribution for START indices.
-        segment_length = p_total / batch_size
-        segment_starts = np.arange(batch_size) * segment_length
-        samples = np.random.uniform(0.0, segment_length, [batch_size]) + segment_starts
-        prios, start_idxs, tree_idxs = self.st.find(samples)
-
-        # Refill invalid rows in place rather than re-rolling the whole batch.
-        # Old recursion re-sampled all B rows on any single invalid hit, which
-        # at small capacity (e.g. --testing with size=1024, seq_len=12) could
-        # spin to the retry cap spuriously. Targeted refill converges in O(1)
-        # retries and preserves valid rows' priority stratification.
-        #
-        # Seam rejection — the write head ``W = point_mem_idx`` marks the
-        # boundary between the newest-written transition (at ``W-1``, latest
-        # in time) and the oldest surviving transition (at ``W``, about to be
-        # overwritten). Walking the buffer forward in INDEX space:
-        #
-        #   index:  ... W-2, W-1, W,   W+1, W+2, ...   (mod capacity)
-        #   time:   ... t-2, t-1, t_old, t_old+1, ...
-        #
-        # The forward transition W-1 → W is the ONLY time discontinuity:
-        # "newest write" jumps back to "oldest write". Every other forward
-        # step in index space is also a forward step in time (once we mod
-        # back around to W-1 from the other side, we continue contiguously).
-        #
-        # A sequence starting at ``s`` with length ``seq_len`` crosses this
-        # seam iff W-1 appears in positions [s .. s+seq_len-2] — i.e. iff
-        # the sequence will try to step from index W-1 to index W within its
-        # window. Equivalently: ``dist = (W - s) % capacity``; reject iff
-        # ``0 < dist < seq_len``.
-        #
-        # Edge case ``dist == 0`` (s == W) is VALID — the sequence starts at
-        # the oldest surviving transition and walks forward into more middle-
-        # aged data, all contiguous in time. Only ``dist >= 1`` with
-        # ``dist < seq_len`` indicates the sequence will cross the seam.
-        #
-        # The previous check ``seq_idxs == W`` caught the common case (sequence
-        # contains W) but was noisy around wrap boundaries. The distance form
-        # is simpler and well-defined without special-casing the modulus.
-        MAX_ROW_RETRIES = 20
-        for _attempt in range(MAX_ROW_RETRIES):
-            raw_idxs = start_idxs[:, None] + np.arange(seq_len)[None, :]
-            if self.capacity == self.size:
-                seq_idxs = raw_idxs % self.capacity
-                dist = (self.point_mem_idx - start_idxs) % self.capacity
-                invalid_mask = (dist > 0) & (dist < seq_len)
-            else:
-                invalid_mask = np.any(raw_idxs >= self.capacity, axis=1)
-                seq_idxs = raw_idxs
-            if not invalid_mask.any():
-                break
-            # Re-roll only the bad rows: draw from the same stratified segments
-            # so priority coverage stays even.
-            bad = np.where(invalid_mask)[0]
-            bad_samples = (
-                np.random.uniform(0.0, segment_length, [len(bad)]) + segment_starts[bad]
-            )
-            bad_prios, bad_starts, bad_tree = self.st.find(bad_samples)
-            prios[bad] = bad_prios
-            start_idxs[bad] = bad_starts
-            tree_idxs[bad] = bad_tree
-        else:
-            raise RuntimeError(
-                f"sample_sequences({batch_size=}, {seq_len=}) couldn't find "
-                f"{batch_size} non-seam starts after {MAX_ROW_RETRIES} row-refill "
-                "attempts. Capacity may be too small relative to seq_len, or "
-                "the buffer is pathologically packed."
-            )
-        probs = prios / p_total
-
-        # Dereference pointer_mem in one flat pass for speed.
-        flat_pointers = self.pointer_mem[seq_idxs.flatten()]  # (B*T,)
-
-        state_ptr_flat = np.array([p[0] for p in flat_pointers])  # (B*T, framestack)
-        n_state_ptr_flat = np.array([p[1] for p in flat_pointers])
-        # reward_array per entry is length n_step; p[2][0] is the action index
-        # (also the first reward index for n-step accumulation).
-        action_ptr_flat = np.array([p[2][0] for p in flat_pointers])  # (B*T,)
-
-        states = self.state_mem[state_ptr_flat].reshape(
-            batch_size, seq_len, self.framestack, self.imagey, self.imagex
-        )
-        n_states = self.state_mem[n_state_ptr_flat].reshape(
-            batch_size, seq_len, self.framestack, self.imagey, self.imagex
-        )
-
-        actions = self.action_mem[action_ptr_flat].reshape(batch_size, seq_len)
-
-        # Rewards + dones: if n_step=1 the "per-timestep n-step reward" is just
-        # reward_mem[action_ptr]; if n_step>1 we need the full n-step window
-        # per timestep and then apply discount per (B, T) element.
-        if self.n_step > 1:
-            reward_ptr_seq = np.array([p[2] for p in flat_pointers]).reshape(
-                batch_size, seq_len, self.n_step
-            )
-            rewards_nstep = self.reward_mem[reward_ptr_seq]  # (B, T, n_step)
-            dones_nstep = self.done_mem[reward_ptr_seq]
-            truns_nstep = self.trun_mem[reward_ptr_seq]
-
-            # Apply per-(B, T) n-step discount. compute_discounted_rewards_batch
-            # operates on (batch, n_step) so flatten (B, T) → (B*T) for it.
-            rewards_flat, dones_flat = self.compute_discounted_rewards_batch(
-                rewards_nstep.reshape(batch_size * seq_len, self.n_step),
-                dones_nstep.reshape(batch_size * seq_len, self.n_step),
-                truns_nstep.reshape(batch_size * seq_len, self.n_step),
-            )
-            rewards = rewards_flat.reshape(batch_size, seq_len)
-            dones = dones_flat.reshape(batch_size, seq_len)
-        else:
-            # n_step=1 — trivial, just per-timestep single-step reward.
-            rewards = self.reward_mem[action_ptr_flat].reshape(batch_size, seq_len)
-            dones = self.done_mem[action_ptr_flat].reshape(batch_size, seq_len)
-
-        # IS weights from the START position's priority (single weight per sequence).
-        weights = (self.capacity * probs) ** -self.alpha
-        weights = torch.tensor(
-            weights / weights.max(),
-            dtype=torch.float32,
-            device=self.device,
-        )
-
-        if torch.isnan(weights).any():
-            if count >= 5:
-                raise RuntimeError(
-                    "PER.sample_sequences() produced NaN weights after retries"
-                )
-            return self.sample_sequences(batch_size, seq_len, count + 1)
-
-        # To device.
-        states_t = torch.tensor(states, dtype=torch.float32, device=self.device)
-        n_states_t = torch.tensor(n_states, dtype=torch.float32, device=self.device)
-        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-        dones_t = torch.tensor(dones, dtype=torch.bool, device=self.device)
-        actions_t = torch.tensor(actions, dtype=torch.int64, device=self.device)
-
-        return tree_idxs, states_t, actions_t, rewards_t, n_states_t, dones_t, weights
+        return tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens
 
     def compute_discounted_rewards_batch(
         self,
@@ -808,14 +674,18 @@ class PER:
             "tstep_counter": list(self.tstep_counter),
             "state_buffer": [list(b) for b in self.state_buffer],
             "reward_buffer": [list(b) for b in self.reward_buffer],
-            # Memory arrays — big ones live here. The action/reward/done/trun
-            # arrays are small (1.83M × small-dtype); state_mem is the 19 GB.
+            # Memory arrays — big ones live here. state_mem ~ 19 GB, h_mem +
+            # c_mem ~ 3.58 GB together, the others small. Skipping h/c would
+            # let a resume silently zero out hidden context — cheaper to ship
+            # the fp16 arrays than to warmup-rebuild them.
             "state_mem": self.state_mem,
             "action_mem": self.action_mem,
             "reward_mem": self.reward_mem,
             "done_mem": self.done_mem,
             "trun_mem": self.trun_mem,
             "pointer_mem": self.pointer_mem,
+            "h_mem": self.h_mem,
+            "c_mem": self.c_mem,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -825,9 +695,18 @@ class PER:
         """
         # Validate shapes first — a mismatch means the config changed and
         # silently overwriting would produce corrupt sampling.
+        # Pre-2026-04-23 checkpoints predate stored-hidden replay and won't
+        # carry h_mem / c_mem. Surface this as a clear error rather than a
+        # bare KeyError inside the shape-check loop.
+        if "h_mem" not in state or "c_mem" not in state:
+            raise ValueError(
+                "PER checkpoint missing h_mem / c_mem — this is a pre-refactor "
+                "payload from before 2026-04-23 (stored-hidden replay). Resume "
+                "from this checkpoint isn't supported; re-warmup from scratch."
+            )
         for key in (
             "state_mem", "action_mem", "reward_mem", "done_mem",
-            "trun_mem", "pointer_mem",
+            "trun_mem", "pointer_mem", "h_mem", "c_mem",
         ):
             have = getattr(self, key).shape
             want = state[key].shape
@@ -855,3 +734,5 @@ class PER:
         self.done_mem[:] = state["done_mem"]
         self.trun_mem[:] = state["trun_mem"]
         self.pointer_mem[:] = state["pointer_mem"]
+        self.h_mem[:] = state["h_mem"]
+        self.c_mem[:] = state["c_mem"]

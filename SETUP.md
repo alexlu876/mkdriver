@@ -160,7 +160,7 @@ Before committing to a multi-hour production run, do a ~10-minute shakedown with
     --run-name shakedown_$(date -u +%Y%m%d_%H%M%S)
 ```
 
-`min_sampling_size=20000` isn't arbitrary — it needs to exceed roughly `batch_size × seq_len × N` (where `seq_len = burn_in_len + learning_seq_len = 60` and `N ≳ 4` for seam-avoidance in the recurrent sampler). Below that, `sample_sequences` hits a "couldn't find non-seam starts" RuntimeError before the learn-step can verify model memory. Production's 200K threshold is way above this; shakedowns just need to clear the sampler-viability floor.
+`min_sampling_size=20000` is generous shakedown-wide headroom — the actual floor with stored-hidden replay (2026-04-23 memory refactor; see `CHANGES.md` Phase 2.5) is just `batch_size × few` since we sample single transitions rather than `(burn_in + learning_window)` sequences. Production's 200K threshold is still correct for letting the behavior-policy explore broadly before learning starts; shakedowns just need enough buffer to see warmup transition to learn-step cleanly.
 
 What this exercises end-to-end:
 - 4-Dolphin launch + slave handshake + X11 cleanup

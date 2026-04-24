@@ -17,7 +17,7 @@ See:
 
 - **P-1 preflight**: complete on Apple Silicon (2026-04-17).
 - **Phase 2.1 env fork**: live-smoke-tested against Dolphin on Luigi Circuit (2026-04-21).
-- **Phase 2.2 BTR fork**: passes 1–5 complete — helper components, `BTRPolicy` (IMPALA+LSTM+IQN), `PER.sample_sequences()` for R2D2 recurrent replay, `ProgressWeightedTrackSampler` for multi-track curriculum, and a full training loop with Munchausen-IQN loss, checkpoint-resume, graceful shutdown, NaN-bail, and env crash-restart. Post-pass-5 audit findings (2026-04-21) applied inline.
+- **Phase 2.2 BTR fork**: passes 1–5 complete — helper components, `BTRPolicy` (IMPALA+LSTM+IQN), `PER` with stored-hidden replay (2026-04-23 memory refactor, replaced the earlier R2D2 sequence path), `ProgressWeightedTrackSampler` for multi-track curriculum, and a full training loop with Munchausen-IQN loss, checkpoint-resume, graceful shutdown, NaN-bail, and env crash-restart. Post-pass-5 audit findings (2026-04-21) applied inline.
 - **Vast.ai runbook**: pending (next deliverable before production run).
 - **Phase 3+ (curriculum tuning, multi-env scaling)**: downstream of the Vast.ai runbook.
 

@@ -59,8 +59,6 @@ def _tiny_cfg(tmp_path: Path, **overrides) -> TrainConfig:
         input_hw=(24, 32),
         stack_size=4,
         min_sampling_size=16,
-        burn_in_len=2,
-        learning_seq_len=4,
         n_step=2,
         layer_norm=False,
         testing=True,
@@ -74,9 +72,14 @@ def _populate_replay(agent, n: int, rng: np.random.Generator | None = None) -> N
     if rng is None:
         rng = np.random.default_rng(0)
     stack_shape = (agent.cfg.framestack, agent.cfg.imagey, agent.cfg.imagex)
+    lstm_shape = (agent.cfg.lstm_layers, agent.cfg.lstm_hidden)
     for i in range(n):
         state = rng.integers(0, 256, size=stack_shape, dtype=np.uint8)
         nstate = rng.integers(0, 256, size=stack_shape, dtype=np.uint8)
+        # Synthetic stored hidden — doesn't need to be realistic for the
+        # tests that just exercise sampling / loss math.
+        h = rng.standard_normal(size=lstm_shape).astype(np.float16)
+        c = rng.standard_normal(size=lstm_shape).astype(np.float16)
         agent.replay.append(
             state=state,
             action=int(rng.integers(0, 40)),
@@ -85,6 +88,7 @@ def _populate_replay(agent, n: int, rng: np.random.Generator | None = None) -> N
             done=(i == n - 1),  # terminate at the end so last n-step window closes
             trun=False,
             stream=0,
+            hidden=(h, c),
         )
 
 # ---------------------------------------------------------------------------
@@ -98,9 +102,6 @@ class TestConfigLoading:
         cfg = load_config(Path(__file__).resolve().parents[1] / "configs" / "btr.yaml")
         assert cfg.batch_size == 256
         assert cfg.target_replace_grad_steps == 200  # audit override, not VIPTankz's 500
-        assert cfg.burn_in_len == 20
-        assert cfg.learning_seq_len == 40
-        assert cfg.priority_eta == 0.9
         assert cfg.testing is False
 
     def test_testing_flag_merges_subtree(self) -> None:
@@ -114,7 +115,6 @@ class TestConfigLoading:
         assert cfg.batch_size == 4
         assert cfg.replay_size == 1024
         assert cfg.lstm_hidden == 64  # tiny model
-        assert cfg.burn_in_len == 4
         assert cfg.testing is True
 
     def test_input_hw_converted_to_tuple(self) -> None:
@@ -420,8 +420,7 @@ class TestBTRAgentBuild:
             lstm_hidden=16, feature_dim=16, linear_size=16,
             num_tau=4, n_cos=8, encoder_channels=(4, 8, 8),
             framestack=4, imagex=32, imagey=24, input_hw=(24, 32),
-            stack_size=4, min_sampling_size=16,
-            burn_in_len=2, learning_seq_len=4, n_step=2,
+            stack_size=4, min_sampling_size=16, n_step=2,
             layer_norm=False, testing=True,
         )
         agent = BTRAgent.build(cfg)
@@ -531,9 +530,9 @@ class TestBTRAgentLearnStep:
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        # Need min_sampling_size + seq_len + n_step headroom.
-        seq_len = cfg.burn_in_len + cfg.learning_seq_len
-        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        # Need min_sampling_size + n_step headroom (stored-hidden replay
+        # needs no seq_len prefix).
+        _populate_replay(agent, cfg.min_sampling_size + cfg.n_step + 4)
 
         # Snapshot a weight-bearing online param (avoid NoisyLinear ε buffers —
         # those are resampled every forward and "change" on every step trivially).
@@ -578,14 +577,14 @@ class TestBTRAgentLearnStep:
         assert agent.grad_steps == 0
 
     def test_learn_step_priority_writeback(self, tmp_path: Path) -> None:
-        """Spy on replay.update_priorities; verify called with R2D2 aggregation
-        (η·max + (1-η)·mean over the per-timestep |δ| sequence)."""
+        """Spy on replay.update_priorities; verify it's called with per-transition
+        |δ| (one scalar per sample) — stored-hidden replay doesn't do the R2D2
+        η·max + (1-η)·mean aggregation anymore."""
         from mkw_rl.rl.train import BTRAgent
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        seq_len = cfg.burn_in_len + cfg.learning_seq_len
-        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        _populate_replay(agent, cfg.min_sampling_size + cfg.n_step + 4)
 
         captured: list[tuple[np.ndarray, np.ndarray]] = []
         real_update = agent.replay.update_priorities
@@ -612,11 +611,10 @@ class TestBTRAgentLearnStep:
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        seq_len = cfg.burn_in_len + cfg.learning_seq_len
-        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        _populate_replay(agent, cfg.min_sampling_size + cfg.n_step + 4)
 
         nan_loss = torch.tensor(float("nan"))
-        fake_td = torch.zeros(cfg.batch_size * cfg.learning_seq_len)
+        fake_td = torch.zeros(cfg.batch_size)
 
         with patch(
             "mkw_rl.rl.train._compute_td_error_and_loss",
@@ -700,12 +698,16 @@ class TestCheckpointRoundTrip:
 
         # Populate replay with enough transitions to see non-zero capacity.
         rng = _np.random.default_rng(0)
+        lstm_shape = (cfg.lstm_layers, cfg.lstm_hidden)
         for i in range(30):
             s = rng.integers(0, 256, size=(cfg.framestack, cfg.imagey, cfg.imagex), dtype=_np.uint8)
             ns = rng.integers(0, 256, size=(cfg.framestack, cfg.imagey, cfg.imagex), dtype=_np.uint8)
+            h = rng.standard_normal(size=lstm_shape).astype(_np.float16)
+            c = rng.standard_normal(size=lstm_shape).astype(_np.float16)
             agent.replay.append(
                 state=s, action=i % 4, reward=float(i),
                 n_state=ns, done=(i == 29), trun=False, stream=0,
+                hidden=(h, c),
             )
         seeded_capacity = agent.replay.capacity
         assert seeded_capacity > 0, "test setup: expected replay to have grown"
@@ -855,8 +857,7 @@ class TestLearnStepGradNormNaN:
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        seq_len = cfg.burn_in_len + cfg.learning_seq_len
-        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        _populate_replay(agent, cfg.min_sampling_size + cfg.n_step + 4)
 
         with patch(
             "torch.nn.utils.clip_grad_norm_",
@@ -874,12 +875,11 @@ class TestMaxNonFiniteAbort:
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        seq_len = cfg.burn_in_len + cfg.learning_seq_len
-        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        _populate_replay(agent, cfg.min_sampling_size + cfg.n_step + 4)
 
         agent.nonfinite_streak = agent.MAX_NONFINITE - 1
         nan_loss = torch.tensor(float("nan"))
-        fake_td = torch.zeros(cfg.batch_size * cfg.learning_seq_len)
+        fake_td = torch.zeros(cfg.batch_size)
         with patch(
             "mkw_rl.rl.train._compute_td_error_and_loss",
             return_value=(nan_loss, fake_td),
@@ -1397,8 +1397,6 @@ replay:
   n_step: {cfg.n_step}
 training:
   batch_size: {cfg.batch_size}
-  burn_in_len: {cfg.burn_in_len}
-  learning_seq_len: {cfg.learning_seq_len}
   min_sampling_size: {cfg.min_sampling_size}
 runtime:
   device: cpu
@@ -1803,8 +1801,7 @@ class TestLearnStepMetricsHaveNonfiniteStreak:
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        seq_len = cfg.burn_in_len + cfg.learning_seq_len
-        _populate_replay(agent, cfg.min_sampling_size + seq_len + cfg.n_step + 4)
+        _populate_replay(agent, cfg.min_sampling_size + cfg.n_step + 4)
         m = agent.learn_step()
         assert "nonfinite_streak" in m
         assert m["nonfinite_streak"] == 0

@@ -1,14 +1,13 @@
-"""BTR training: recurrent IQN-Munchausen-PER on multi-track MKWii.
+"""BTR training: IQN-Munchausen-PER + stateful LSTM on multi-track MKWii.
 
-Orchestrates the components built in passes 1-4:
-- ``BTRPolicy`` (IMPALA+LSTM+IQN heads, pass 2)
-- ``PER`` with ``sample_sequences()`` (R2D2 recurrent replay, passes 1+3)
-- ``ProgressWeightedTrackSampler`` (pass 4)
-- ``MkwDolphinEnv`` (phase 2.1)
+Orchestrates:
+- ``BTRPolicy`` (IMPALA + LSTM + IQN heads; see ``rl/model.py``)
+- ``PER`` with stored-hidden replay (see ``rl/replay.py``)
+- ``ProgressWeightedTrackSampler``
+- ``MkwDolphinEnv``
 
 Ports VIPTankz's ``Agent.learn_call`` (BTR.py:976-1090) with the HIGH
-findings from the 2026-04-21 forensic audit applied inline (see the
-``_quantile_huber_loss`` and ``_compute_priority`` docstrings):
+findings from the 2026-04-21 forensic audit applied inline:
 
 1. Quantile-Huber axis convention follows Dabney et al. 2018 eq. 10
    (sum over target-tau, mean over online-tau) rather than VIPTankz's
@@ -17,24 +16,27 @@ findings from the 2026-04-21 forensic audit applied inline (see the
    decouple the two tau counts.
 2. Priority signal uses ``mean(dim=tau).mean(dim=tau)`` (scale-invariant)
    rather than ``sum(dim=tau).mean(dim=tau)`` which scales with num_tau.
-3. Sequence-level priority aggregation follows R2D2 §2.3 eq. 1:
-   ``η·max_t|δ_t| + (1-η)·mean_t|δ_t|`` with ``η=0.9``.
-4. Target-net update cadence defaulted to 200 grad steps (MKWii is
+3. Target-net update cadence defaulted to 200 grad steps (MKWii is
    non-stationary; VIPTankz's 500 was Atari-tuned).
-5. Exploration: we drop the 100M-frame ε-disable schedule — noisy-nets
+4. Exploration: we drop the 100M-frame ε-disable schedule — noisy-nets
    handles exploration by construction.
-6. Target net has noise permanently disabled (VIPTankz resamples per
+5. Target net has noise permanently disabled (VIPTankz resamples per
    learn step). Keeps Munchausen's `π_target = softmax(Q_target/τ)`
    deterministic within a batch.
-7. Target LSTM burn-in runs on `n_states[:, :burn_in]` (not `states[...]`)
-   so the target's hidden is aligned to its learning-window inputs,
-   which come from the n-step-shifted state sequence.
-8. Scalar `γ^n_step` bootstrap discount — over-discounts n-step windows
+6. Scalar `γ^n_step` bootstrap discount — over-discounts n-step windows
    clipped by `trun` (without `done`). Impact is small at n=3 for
    MKWii's ~1000-frame episodes; matches VIPTankz.
 
+LSTM state handling (2026-04-23 refactor, replaces pass-3 R2D2):
+    Each replay transition carries the ``(h, c)`` the rollout agent consumed
+    at that timestep. ``learn_step`` forwards the online net from those
+    stored hiddens (single-step, no sequence unroll). Target uses zero-init
+    hidden. Representational drift (Kapturowski 2019 §4) is the cost; the
+    payoff is ~60× drop in encoder activation memory vs the prior R2D2
+    burn-in + learning-window unroll.
+
 See `docs/TRAINING_METHODOLOGY.md` "Inherited implementation quirks" for
-the full list (items 7-15) with paper references.
+the full list with paper references.
 """
 
 from __future__ import annotations
@@ -132,9 +134,6 @@ class TrainConfig:
     target_replace_grad_steps: int = 200
     min_sampling_size: int = 200_000
     total_frames: int = 500_000_000
-    burn_in_len: int = 20
-    learning_seq_len: int = 40
-    priority_eta: float = 0.9
     entropy_tau: float = 0.03
     munch_alpha: float = 0.9
     munch_lo: float = -1.0
@@ -228,7 +227,6 @@ def load_config(path: str | Path, testing: bool = False) -> TrainConfig:
         for k in (
             "batch_size", "lr", "grad_clip", "replay_ratio",
             "target_replace_grad_steps", "min_sampling_size", "total_frames",
-            "burn_in_len", "learning_seq_len", "priority_eta",
             "entropy_tau", "munch_alpha", "munch_lo",
         ):
             if k in raw["training"]:
@@ -640,6 +638,8 @@ class BTRAgent:
             imagex=cfg.imagex,
             imagey=cfg.imagey,
             storage_size_multiplier=cfg.storage_size_multiplier,
+            lstm_hidden=cfg.lstm_hidden,
+            lstm_layers=cfg.lstm_layers,
         )
 
         # Pass the metadata path so ``available_tracks`` intersects on-disk
@@ -708,112 +708,80 @@ class BTRAgent:
     # ------------------------------------------------------------------
 
     def learn_step(self) -> dict[str, float]:
-        """One gradient step from a sequence sampled out of the recurrent replay.
+        """One gradient step on a batch of single-step transitions.
 
         Returns scalar metrics for logging (loss, td abs mean, grad norm, etc.).
         No-op if replay hasn't warmed up yet.
 
-        Forward passes run under ``torch.autocast(bfloat16)`` — halves
-        activation memory for the backward graph compared to pure fp32.
-        bfloat16 shares fp32's exponent range so we don't need GradScaler.
-        Backward + optimizer step stay in fp32 (parameters + Adam moments).
+        Stored-hidden replay (2026-04-23 refactor): each transition carries the
+        LSTM (h, c) the rollout agent CONSUMED at that timestep. We initialize
+        the online net's LSTM from those stored hiddens — no burn-in forward
+        needed. The target net runs on n_state with a zero-init hidden
+        (Kapturowski 2019 §3.2 "zero state" variant; degrades slightly relative
+        to burn-in / stored target, but the R2D2 paper shows all three converge).
+
+        Runs in fp32. We previously wrapped forward + loss in
+        ``torch.autocast(bfloat16)`` to halve R2D2 activation memory; the
+        stored-hidden refactor cut activations ~60× so bf16 isn't needed for
+        memory. Re-add only if training slows significantly on Blackwell.
         """
         if self.replay.capacity < self.cfg.min_sampling_size:
             return {}
 
-        seq_len = self.cfg.burn_in_len + self.cfg.learning_seq_len
-        tree_idxs, states, actions, rewards, n_states, dones, weights = (
-            self.replay.sample_sequences(self.cfg.batch_size, seq_len)
+        tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens = (
+            self.replay.sample(self.cfg.batch_size)
         )
-        # states/n_states: (B, seq_len, framestack, H, W) float32 on device
-        # actions: (B, seq_len) int64, rewards/dones: (B, seq_len), weights: (B,)
+        # states/n_states: (B, framestack, H, W) uint8 on device
+        # actions: (B,) int64, rewards/dones: (B,), weights: (B,)
+        # hiddens: (h, c) each (lstm_layers, B, lstm_hidden) float32 on device
 
-        burn_in = self.cfg.burn_in_len
-        burn_states = states[:, :burn_in]
-        burn_n_states = n_states[:, :burn_in]
-        learn_states = states[:, burn_in:]
-        learn_n_states = n_states[:, burn_in:]
-        learn_actions = actions[:, burn_in:]
-        learn_rewards = rewards[:, burn_in:]
-        learn_dones = dones[:, burn_in:]
+        # Add a trivial time dim so the (B, T, stack, H, W) model signature
+        # works unchanged. Free — it's a view, no memory allocated.
+        states = states.unsqueeze(1)
+        n_states = n_states.unsqueeze(1)
 
-        # Warm-up noise: resample before BOTH burn-in and learning forward so
-        # the LSTM hidden state is computed under the same noise realization
-        # that the subsequent gradient step will use. Target stays deterministic
-        # (disable_noise at build + sync); do NOT reset_noise() on target here.
+        # Noise: resample online before forward; target stays deterministic
+        # (disabled at build and every sync).
         self.online_net.reset_noise()
 
-        # bfloat16 mixed precision for forward + loss. Halves activation
-        # memory vs pure fp32 — critical at bs=128 × seq_len=60 on the
-        # 3-layer (32/64/64) encoder, which otherwise needs ~30 GB of
-        # backward-graph activations. Only apply on CUDA; CPU autocast
-        # is fp16 / bf16 quality-dependent and we don't need it there.
-        use_amp = self.device.type == "cuda"
-        amp_ctx = (
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-            if use_amp else contextlib.nullcontext()
+        # Online forward at (s_t) with the stored LSTM init.
+        online_quantiles, online_taus, _ = self.online_net(
+            states, hidden=hiddens
+        )
+        # (B, 1, num_tau, n_actions), (B, 1, num_tau, 1)
+
+        # Target forward at s_{t+n} with zero-init hidden. No grad.
+        with torch.no_grad():
+            target_quantiles, _, _ = self.target_net(n_states, hidden=None)
+
+        # Squeeze the trivial T dim so the loss math matches VIPTankz's
+        # original single-step shape contract.
+        online_q = online_quantiles.squeeze(1)  # (B, num_tau, n_actions)
+        online_tau = online_taus.squeeze(1)     # (B, num_tau, 1)
+        target_q = target_quantiles.squeeze(1)
+        dones_ = dones.unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1)
+
+        # Munchausen reward (needs online Q at current state, detached).
+        munch_reward = _compute_munchausen_reward(
+            online_q.detach(),
+            rewards,
+            actions,
+            self.cfg.entropy_tau,
+            self.cfg.munch_alpha,
+            self.cfg.munch_lo,
         )
 
-        with amp_ctx:
-            # Burn-in forward on online + target. No grad; warms up the LSTM hidden.
-            # Target burns in on n_states so its hidden corresponds to n_states[:, burn_in]
-            # — this is the state the learning-window target forward actually consumes.
-            with torch.no_grad():
-                _, _, hidden_online = self.online_net(burn_states)
-                _, _, hidden_target = self.target_net(burn_n_states)
-
-            # Learning-window forward on online (with grad).
-            online_quantiles_seq, online_taus_seq, _ = self.online_net(
-                learn_states, hidden=hidden_online
-            )
-            # (B, T, num_tau, n_actions), (B, T, num_tau, 1)
-
-            # Target net forward on n-state sequence (no grad).
-            with torch.no_grad():
-                target_quantiles_seq, _, _ = self.target_net(
-                    learn_n_states, hidden=hidden_target
-                )
-
-            # Flatten (B, T) → (B*T) so per-timestep loss math mirrors the
-            # original single-step pattern in VIPTankz. Done inside autocast
-            # so the reshape produces bf16 views consistent with the upstream
-            # forward — saves a subtle fp32 cast on the loss inputs.
-            B, T = learn_actions.shape
-            online_q_flat = online_quantiles_seq.reshape(B * T, self.cfg.num_tau, -1)
-            online_taus_flat = online_taus_seq.reshape(B * T, self.cfg.num_tau, 1)
-            target_q_flat = target_quantiles_seq.reshape(B * T, self.cfg.num_tau, -1)
-            actions_flat = learn_actions.reshape(B * T)
-            rewards_flat = learn_rewards.reshape(B * T)
-            dones_flat = learn_dones.reshape(B * T, 1, 1)
-            # Broadcast per-sequence weights across T so each element gets the same weight.
-            weights_flat = weights.unsqueeze(1).expand(-1, T).reshape(B * T)
-
-            # Munchausen reward (needs online Q at current state, detached).
-            munch_reward = _compute_munchausen_reward(
-                online_q_flat.detach(),
-                rewards_flat,
-                actions_flat,
-                self.cfg.entropy_tau,
-                self.cfg.munch_alpha,
-                self.cfg.munch_lo,
-            )
-
-            loss, td_abs_flat = _compute_td_error_and_loss(
-                online_q_flat,
-                online_taus_flat,
-                target_q_flat,
-                actions_flat,
-                munch_reward,
-                gamma_n=self.cfg.gamma**self.cfg.n_step,
-                dones=dones_flat,
-                weights=weights_flat,
-                entropy_tau=self.cfg.entropy_tau,
-            )
-
-        # loss comes back in bf16 from autocast; cast to fp32 for the
-        # isfinite check and backward so the optimizer sees fp32 grads.
-        if use_amp:
-            loss = loss.float()
+        loss, td_abs = _compute_td_error_and_loss(
+            online_q,
+            online_tau,
+            target_q,
+            actions,
+            munch_reward,
+            gamma_n=self.cfg.gamma**self.cfg.n_step,
+            dones=dones_,
+            weights=weights,
+            entropy_tau=self.cfg.entropy_tau,
+        )
 
         # NaN/inf guard: entropy_tau=0.03 + outlier Q can overflow logsumexp.
         # Skip the step rather than poisoning weights with a NaN Adam moment.
@@ -854,11 +822,10 @@ class BTRAgent:
         self.nonfinite_streak = 0
         self.optimizer.step()
 
-        # Priority update: aggregate per-sequence via R2D2's η·max + (1-η)·mean.
-        td_abs_bt = td_abs_flat.reshape(B, T).cpu().numpy()  # (B, T)
-        eta = self.cfg.priority_eta
-        seq_priorities = eta * td_abs_bt.max(axis=1) + (1 - eta) * td_abs_bt.mean(axis=1)
-        self.replay.update_priorities(tree_idxs, seq_priorities)
+        # Priority update: per-transition |δ|. No R2D2 sequence aggregation
+        # needed (each sample is a single transition).
+        td_abs_np = td_abs.cpu().numpy()  # (B,)
+        self.replay.update_priorities(tree_idxs, td_abs_np)
 
         self.grad_steps += 1
         if self.grad_steps % self.cfg.target_replace_grad_steps == 0:
@@ -866,7 +833,7 @@ class BTRAgent:
 
         return {
             "loss": float(loss.item()),
-            "td_abs_mean": float(td_abs_bt.mean()),
+            "td_abs_mean": float(td_abs_np.mean()),
             "grad_norm": float(grad_norm),
             "grad_steps": self.grad_steps,
             # Include on the happy path (always 0 here) so the CSV/wandb
@@ -946,6 +913,16 @@ def run_one_episode(
     while True:
         # To tensor for action selection: (1, 1, stack, H, W).
         obs_t = torch.from_numpy(obs).unsqueeze(0).unsqueeze(0)
+        # Stash the LSTM (h, c) that will be CONSUMED by this step, so that
+        # at replay time we can reproduce the agent's view of this transition
+        # without burn-in. Squeeze the batch dim (B=1) and move to CPU fp16
+        # to match PER.h_mem / c_mem dtype. None → episode-start zero-init.
+        if hidden is None:
+            stored_hidden = None
+        else:
+            h_np = hidden[0].detach().squeeze(1).to("cpu", dtype=torch.float16).numpy()
+            c_np = hidden[1].detach().squeeze(1).to("cpu", dtype=torch.float16).numpy()
+            stored_hidden = (h_np, c_np)
         with lock:
             action, hidden = agent.act(obs_t, hidden, deterministic=deterministic)
 
@@ -961,6 +938,7 @@ def run_one_episode(
                 done=bool(terminated),
                 trun=bool(truncated),
                 stream=stream,
+                hidden=stored_hidden,
             )
             agent.env_steps += 1
         episode_return += reward

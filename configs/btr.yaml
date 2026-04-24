@@ -64,12 +64,6 @@ training:
   min_sampling_size: 200000                  # fill replay before first gradient (random policy)
   total_frames: 500000000                    # 500M env steps for production; --testing shrinks this
 
-  # R2D2 sequence sampling (pass 3).
-  burn_in_len: 20
-  learning_seq_len: 40
-  # Priority aggregation η·max + (1-η)·mean per R2D2 paper §2.3 eq. 1.
-  priority_eta: 0.9
-
   # Munchausen-DQN (VIPTankz).
   entropy_tau: 0.03
   munch_alpha: 0.9
@@ -109,8 +103,6 @@ testing:
     min_sampling_size: 64                    # warm up quickly
     total_frames: 500                        # ~2 short episodes on Luigi Circuit
     target_replace_grad_steps: 10
-    burn_in_len: 4
-    learning_seq_len: 8
   logging:
     log_every_grad_steps: 1
     checkpoint_every_grad_steps: 50

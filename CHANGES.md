@@ -65,6 +65,25 @@ Goal: scale from single-env to VIPTankz's 4-parallel-Dolphin pattern so a real p
 - **More savestates needed** — only Luigi Circuit is live-tested. 24 of 25 track_metadata entries have no savestate; multi-track training blocked until user records them.
 - **Consecutive-crash reset in multi-track** — the N-successes-to-reset semantics is defensible for single-track but hasn't been stress-tested with a 20-track curriculum where per-track crash rates vary wildly. May need windowed-rate semantics once multi-track runs start.
 
+### Phase 2.5 — memory refactor: R2D2 → stored-hidden replay (2026-04-23)
+
+Why: at `bs=128 × seq_len=60` (burn_in=20 + learning=40), the encoder forward ran ~7680 effective samples per learn_step and consumed ~25 GB GPU activation memory on a 5090 even with bf16 autocast + gradient checkpointing. The source videos prescribed adding an LSTM but did *not* prescribe R2D2 specifically — that was our implementation choice for handling LSTM hidden state at replay time. `docs/TRAINING_METHODOLOGY.md` §"LSTM state at replay time" had pre-authorized stored-hidden replay as the fallback if memory became a problem.
+
+What changed:
+
+- **`PER`**: added `h_mem` / `c_mem` fp16 arrays (per-transition `(h, c)` indexed by `reward_mem_idx`; ~3.6 GB total at prod scale vs 19 GB `state_mem`). `append()` gains a `hidden` kwarg; `None` stores zeros (episode-start convention). `sample()` now returns `(tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens)` with hiddens shaped `(lstm_layers, B, lstm_hidden)` fp32 on device. `sample_sequences()` deleted. `state_dict` / `load_state_dict` persist h/c.
+- **Rollout path** (`run_one_episode` in `train.py`): stashes the `(h, c)` consumed before each `act()` call, passes to `replay.append(hidden=...)`. Multi-env `_rollout_worker` inherits this via the shared function.
+- **`learn_step`**: sampler returns single transitions + stored `(h, c)`; online net forwards at `states.unsqueeze(1)` with `hidden=stored_hc`; target net forwards at n_states with `hidden=None` (Kapturowski 2019 §3.2 "zero state" variant). Loss math runs on `(B, ...)` shapes without T-flattening. Priority update uses per-transition `|δ|` directly — no R2D2 `η·max + (1-η)·mean` aggregation.
+- **Input staging fix** (same audit pass): `sample()` now returns `states` / `n_states` as `uint8` on device instead of casting to fp32. `BTRPolicy.forward` already did the `.float()/255` conversion internally, so the fp32 cast was pure waste (~2.5 GB GPU per learn_step at prod scale).
+- **Config cleanup**: `burn_in_len`, `learning_seq_len`, `priority_eta` removed from `TrainConfig`, `configs/btr.yaml`, `BTRConfig`.
+- **Tests**: `tests/test_btr_components.py::TestPERSampleSequences` class deleted (14 tests). Added `test_stored_hidden_round_trips` and `test_none_hidden_stores_zeros`. Updated the `sample()` callers to unpack the new 8-tuple. **303 tests pass.**
+
+Expected GPU memory impact at `bs=128`, production config:
+- Prior path: ~25 GB peak (needed bf16 + gradient checkpointing + 32 GB GPU to fit).
+- Stored-hidden path: ~5–8 GB peak (VIPTankz-equivalent envelope). Gradient checkpointing no longer load-bearing.
+
+Tradeoff: representational drift. Stored `(h, c)` was produced by older online-net weights; sampled N grad steps later the network has moved, so the stored hidden is "wrong" relative to what current weights would produce. Kapturowski 2019 §4 measures this cost as small — burn-in beats stored-state by a few percent on Atari, all three options (zero-state, stored-state, burn-in) converge.
+
 ## Pre-pivot (BC) history — superseded
 
 ## TL;DR

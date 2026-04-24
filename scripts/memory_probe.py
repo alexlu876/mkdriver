@@ -51,8 +51,6 @@ def _print_mem(label: str, baseline: int = 0) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--batch-size", type=int, default=128)
-    ap.add_argument("--burn-in", type=int, default=20)
-    ap.add_argument("--learning-seq-len", type=int, default=40)
     ap.add_argument("--framestack", type=int, default=4)
     ap.add_argument("--imagey", type=int, default=75)
     ap.add_argument("--imagex", type=int, default=140)
@@ -86,7 +84,6 @@ def main() -> int:
     from mkw_rl.rl.model import BTRConfig, BTRPolicy
     from mkw_rl.rl.replay import PER
 
-    seq_len = args.burn_in + args.learning_seq_len
     enc_ch = tuple(int(x) for x in args.encoder_channels.split(","))
 
     _print_mem("00 baseline (after imports)")
@@ -144,16 +141,18 @@ def main() -> int:
     _print_mem("03 after PER construction (CPU-side buffers)")
 
     rng = np.random.default_rng(0)
-    # Fill replay up to >> seq_len so sample_sequences works.
-    n_prime = max(seq_len * 8, 4096)
+    n_prime = 4096
     print(f"priming replay with {n_prime} transitions per stream (4 streams)...")
     for stream in range(4):
+        h = np.zeros((1, args.lstm_hidden), dtype=np.float16)
+        c = np.zeros((1, args.lstm_hidden), dtype=np.float16)
         for i in range(n_prime):
             state = rng.integers(0, 256, size=(args.framestack, args.imagey, args.imagex), dtype=np.uint8)
             n_state = rng.integers(0, 256, size=(args.framestack, args.imagey, args.imagex), dtype=np.uint8)
             replay.append(
                 state=state, action=i % 40, reward=float(i % 10) * 0.1,
                 n_state=n_state, done=(i == n_prime - 1), trun=False, stream=stream,
+                hidden=(h, c),
             )
     _print_mem("04 after priming replay (should still be ~same; CPU-side)")
 
@@ -171,52 +170,44 @@ def main() -> int:
         print(f"\n=== learn_step {step + 1}/{args.steps} ===")
         base = _print_mem(f"  {step}.0 entry")
 
-        # Sample sequences (allocates GPU tensors for the batch).
-        _, states, actions, rewards, n_states, dones, weights = replay.sample_sequences(
-            args.batch_size, seq_len,
+        # Sample single-step transitions + stored hiddens.
+        _, states, actions, rewards, n_states, dones, weights, hiddens = replay.sample(
+            args.batch_size,
         )
-        _print_mem(f"  {step}.1 after sample_sequences", base)
+        _print_mem(f"  {step}.1 after sample", base)
 
-        burn_in = args.burn_in
-        burn_states = states[:, :burn_in]
-        burn_n_states = n_states[:, :burn_in]
-        learn_states = states[:, burn_in:]
-        learn_n_states = n_states[:, burn_in:]
+        # Add T=1 dim for the (B, T, stack, H, W) model signature.
+        states = states.unsqueeze(1)
+        n_states = n_states.unsqueeze(1)
 
         online.reset_noise()
         _print_mem(f"  {step}.2 after reset_noise", base)
 
         with amp_ctx():
-            with torch.no_grad():
-                _, _, hidden_online = online(burn_states)
-                _, _, hidden_target = target(burn_n_states)
-            _print_mem(f"  {step}.3 after burn_in fwd (no_grad)", base)
-
-            online_q, online_tau, _ = online(learn_states, hidden=hidden_online)
-            _print_mem(f"  {step}.4 after online learn fwd (grad)", base)
+            online_q, online_tau, _ = online(states, hidden=hiddens)
+            _print_mem(f"  {step}.3 after online fwd (grad)", base)
 
             with torch.no_grad():
-                target_q, _, _ = target(learn_n_states, hidden=hidden_target)
-            _print_mem(f"  {step}.5 after target learn fwd (no_grad)", base)
+                target_q, _, _ = target(n_states, hidden=None)
+            _print_mem(f"  {step}.4 after target fwd (no_grad)", base)
 
             loss = (online_q.mean() - target_q.mean()) ** 2  # dummy but exercises grad
-            _print_mem(f"  {step}.6 after dummy loss", base)
+            _print_mem(f"  {step}.5 after dummy loss", base)
 
         if args.autocast != "off":
             loss = loss.float()
 
         optimizer.zero_grad()
         loss.backward()
-        _print_mem(f"  {step}.7 after backward", base)
+        _print_mem(f"  {step}.6 after backward", base)
         optimizer.step()
-        _print_mem(f"  {step}.8 after optimizer.step", base)
+        _print_mem(f"  {step}.7 after optimizer.step", base)
 
         # Free explicit references so step N+1 starts clean.
-        del states, actions, rewards, n_states, dones, weights
-        del burn_states, burn_n_states, learn_states, learn_n_states
-        del hidden_online, hidden_target, online_q, online_tau, target_q, loss
+        del states, actions, rewards, n_states, dones, weights, hiddens
+        del online_q, online_tau, target_q, loss
         torch.cuda.synchronize()
-        _print_mem(f"  {step}.9 after del + sync", base)
+        _print_mem(f"  {step}.8 after del + sync", base)
 
     print("\n" + "=" * 80)
     print("FINAL torch.cuda.memory_summary():")

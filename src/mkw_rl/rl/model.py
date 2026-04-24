@@ -76,11 +76,15 @@ class BTRConfig:
     spectral_norm: bool = True
     # Gradient checkpointing on the encoder: during training forward, don't
     # store per-block activations for backward — recompute them during
-    # backward instead. ~30% extra compute per learn_step, but drops
-    # encoder activation memory ~80%. Required to fit bs=128 × seq_len=60
-    # BPTT on a 32 GB GPU; pure bf16 is not enough on its own. Inference
-    # (target forward under no_grad, act(), eval_btr) bypasses it.
-    gradient_checkpointing: bool = True
+    # backward instead. ~30% extra compute per learn_step, drops encoder
+    # activation memory ~80%. Added 2026-04-22 when R2D2 seq_len=60 BPTT
+    # was blowing memory on the 32 GB GPU. **Default flipped back to False
+    # 2026-04-24** after the stored-hidden-replay refactor cut encoder
+    # activations ~60×. At bs=256 single-step the learn_step fits comfortably
+    # without it; we get the 30% compute back. Flip to True if you scale
+    # batch size or model width enough that activations become the
+    # bottleneck again.
+    gradient_checkpointing: bool = False
 
 
 class _DuelingBranch(nn.Module):

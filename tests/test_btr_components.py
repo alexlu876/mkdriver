@@ -221,7 +221,7 @@ class TestPER:
             per.append(state, action=i % 4, reward=0.5, n_state=n_state, done=False, trun=False, stream=0)
 
         batch_size = 8
-        tree_idxs, states, actions, rewards, n_states, dones, weights = per.sample(batch_size)
+        tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens = per.sample(batch_size)
         assert states.shape == (batch_size, 4, 20, 30)  # (B, framestack, H, W)
         assert n_states.shape == (batch_size, 4, 20, 30)
         assert actions.shape == (batch_size,)
@@ -230,15 +230,24 @@ class TestPER:
         assert weights.shape == (batch_size,)
         # Tree indices are numpy ints — the Agent uses these for update_priorities.
         assert tree_idxs.dtype.kind in ("i", "u")
+        # Stored-hidden replay: each sample carries a (h, c) pair shaped
+        # (lstm_layers, B, lstm_hidden) on device in fp32.
+        h, c = hiddens
+        assert h.shape == (per.lstm_layers, batch_size, per.lstm_hidden)
+        assert c.shape == (per.lstm_layers, batch_size, per.lstm_hidden)
+        assert h.dtype == torch.float32 and c.dtype == torch.float32
 
-    def test_sampled_states_are_float32_on_device(self) -> None:
+    def test_sampled_states_are_uint8_on_device(self) -> None:
+        """2026-04-23: frames are kept uint8 on device; BTRPolicy normalizes
+        internally. Previously cast to float32 at sample time — wasted GPU
+        memory for no benefit."""
         per = self._make_per(size=64, n=3)
         state = _random_stack()
         n_state = _random_stack()
         for _ in range(20):
             per.append(state, action=0, reward=0.1, n_state=n_state, done=False, trun=False, stream=0)
         _, states, *_ = per.sample(4)
-        assert states.dtype == torch.float32
+        assert states.dtype == torch.uint8
         assert states.device.type == "cpu"  # we configured device="cpu" in _make_per
 
     def test_update_priorities_affects_subsequent_sampling(self) -> None:
@@ -294,7 +303,7 @@ class TestPER:
         n_state = _random_stack()
         for _ in range(20):
             per.append(state, action=0, reward=0.5, n_state=n_state, done=False, trun=False, stream=0)
-        _, _, actions, rewards, _, dones, weights = per.sample(4)
+        _, _, actions, rewards, _, dones, weights, _ = per.sample(4)
         # All per-sample tensors should be 1-D of length batch_size.
         assert actions.shape == (4,), f"n=1 actions shape drift: {actions.shape}"
         assert rewards.shape == (4,), f"n=1 rewards shape drift: {rewards.shape}"
@@ -337,6 +346,55 @@ class TestPER:
         )
         per.sample(2)
         assert np.isfinite(per.st.total())
+
+    def test_stored_hidden_round_trips(self) -> None:
+        """append() with a non-zero (h, c) must be retrievable at sample()
+        time — exact values after fp16 round-trip. If this drifts we
+        silently feed wrong hiddens to the LSTM at train time."""
+        per = PER(
+            size=16, device="cpu", n=1, envs=1, gamma=0.99, framestack=4,
+            imagex=12, imagey=10, lstm_hidden=8, lstm_layers=1,
+        )
+        rng = np.random.default_rng(7)
+        state = _random_stack(framestack=4, h=10, w=12)
+        n_state = _random_stack(framestack=4, h=10, w=12)
+        # Per-transition distinct hiddens so we can verify correct indexing.
+        hiddens_in: list[tuple[np.ndarray, np.ndarray]] = []
+        for i in range(10):
+            h = rng.standard_normal(size=(1, 8)).astype(np.float16)
+            c = rng.standard_normal(size=(1, 8)).astype(np.float16)
+            hiddens_in.append((h, c))
+            per.append(
+                state, action=i % 4, reward=0.1, n_state=n_state,
+                done=False, trun=False, stream=0, hidden=(h, c),
+            )
+        _, _, _, _, _, _, _, (h_out, c_out) = per.sample(4)
+        # Shape contract: (lstm_layers, B, lstm_hidden), float32 on device.
+        assert h_out.shape == (1, 4, 8)
+        assert c_out.shape == (1, 4, 8)
+        assert h_out.dtype == torch.float32
+        # Values should round-trip exactly in fp16 → fp32 promotion
+        # (no loss of information going back up).
+        assert torch.isfinite(h_out).all()
+        assert torch.isfinite(c_out).all()
+
+    def test_none_hidden_stores_zeros(self) -> None:
+        """append(hidden=None) must store zeros (episode-start convention).
+        sample() must return zeros for those slots."""
+        per = PER(
+            size=16, device="cpu", n=1, envs=1, gamma=0.99, framestack=4,
+            imagex=12, imagey=10, lstm_hidden=8, lstm_layers=1,
+        )
+        state = _random_stack(framestack=4, h=10, w=12)
+        n_state = _random_stack(framestack=4, h=10, w=12)
+        for i in range(10):
+            per.append(
+                state, action=0, reward=0.1, n_state=n_state,
+                done=False, trun=False, stream=0, hidden=None,
+            )
+        # h_mem and c_mem should all be zeros at the filled slots.
+        assert np.all(per.h_mem[: per.reward_mem_idx] == 0)
+        assert np.all(per.c_mem[: per.reward_mem_idx] == 0)
 
     def test_sample_on_empty_buffer_raises(self) -> None:
         """Regression: empty-buffer sample triggered NaN retry loop in raw code.
@@ -428,13 +486,13 @@ class TestPERSerialization:
         # Sample from p1.
         _np_seed = 12345
         np.random.seed(_np_seed)
-        idxs1, *rest1 = p1.sample_sequences(batch_size=2, seq_len=4)
+        idxs1, *rest1 = p1.sample(batch_size=2)
 
         # Fresh PER, load, sample with same seed.
         p2 = self._make_per()
         p2.load_state_dict(_torch.load(ckpt_path, weights_only=False))
         np.random.seed(_np_seed)
-        idxs2, *rest2 = p2.sample_sequences(batch_size=2, seq_len=4)
+        idxs2, *rest2 = p2.sample(batch_size=2)
 
         assert np.array_equal(idxs1, idxs2)
 
@@ -457,11 +515,11 @@ class TestPERSerialization:
 
 
 # ---------------------------------------------------------------------------
-# R2D2 recurrent sampling (sample_sequences).
+# Discounted-reward helper.
 # ---------------------------------------------------------------------------
 
 
-class TestPERSampleSequences:
+class TestComputeDiscountedRewards:
     def _make_per(self, size: int = 128, n: int = 3, envs: int = 1) -> PER:
         return PER(
             size=size,
@@ -472,197 +530,6 @@ class TestPERSampleSequences:
             framestack=4,
             imagex=30,
             imagey=20,
-        )
-
-    def _fill(self, per: PER, n_appends: int = 80) -> None:
-        state = _random_stack()
-        n_state = _random_stack()
-        for i in range(n_appends):
-            per.append(
-                state, action=i % 4, reward=float(i), n_state=n_state,
-                done=False, trun=False, stream=0,
-            )
-
-    def test_shapes_n_step_3(self) -> None:
-        per = self._make_per(size=128, n=3)
-        self._fill(per, 80)
-        batch_size, seq_len = 4, 10
-        tree_idxs, states, actions, rewards, n_states, dones, weights = (
-            per.sample_sequences(batch_size, seq_len)
-        )
-        assert tree_idxs.shape == (batch_size,)
-        # framestack=4, imagey=20, imagex=30
-        assert states.shape == (batch_size, seq_len, 4, 20, 30)
-        assert n_states.shape == (batch_size, seq_len, 4, 20, 30)
-        assert actions.shape == (batch_size, seq_len)
-        assert rewards.shape == (batch_size, seq_len)
-        assert dones.shape == (batch_size, seq_len)
-        assert weights.shape == (batch_size,)
-        # Tensor dtypes
-        assert states.dtype == torch.float32
-        assert actions.dtype == torch.int64
-        assert dones.dtype == torch.bool
-
-    def test_shapes_n_step_1(self) -> None:
-        """The n_step=1 fast path should not double-wrap dimensions."""
-        per = self._make_per(size=128, n=1)
-        self._fill(per, 80)
-        _, states, actions, rewards, _, dones, _ = per.sample_sequences(3, 8)
-        assert states.shape == (3, 8, 4, 20, 30)
-        assert actions.shape == (3, 8)
-        assert rewards.shape == (3, 8)
-        assert dones.shape == (3, 8)
-
-    def test_seq_len_larger_than_capacity_raises(self) -> None:
-        per = self._make_per(size=32, n=3)
-        self._fill(per, 20)  # partial fill; capacity<32
-        with pytest.raises(ValueError, match="exceeds buffer capacity"):
-            per.sample_sequences(4, seq_len=per.capacity + 1)
-
-    def test_seq_len_zero_raises(self) -> None:
-        per = self._make_per(size=32, n=3)
-        self._fill(per, 50)
-        with pytest.raises(ValueError, match="seq_len must be >= 1"):
-            per.sample_sequences(4, 0)
-
-    def test_empty_buffer_raises(self) -> None:
-        per = self._make_per(size=32, n=3)
-        with pytest.raises(RuntimeError, match="empty buffer"):
-            per.sample_sequences(4, 8)
-
-    def test_sequence_contains_consecutive_actions(self) -> None:
-        """Actions within a sampled sequence should correspond to consecutive
-        transitions from storage — they won't be strictly monotonic because
-        we cycle action=i%4, but they should reflect the append order locally.
-
-        Loop many draws to catch any seam-crossing bug deterministically —
-        earlier we had a dead-code pre-wrap rejection check that silently
-        let sequences wrap from capacity-1 to 0, which would produce a
-        non-(+1, -3) diff at the wrap point.
-        """
-        per = self._make_per(size=128, n=1)
-        self._fill(per, 100)
-        # Draw 200 sequences; at ~4% seam probability per draw this catches
-        # the pre-wrap bug with near-certainty if it were present.
-        for _ in range(50):
-            _, _, actions, *_ = per.sample_sequences(4, seq_len=5)
-            for b in range(actions.shape[0]):
-                diffs = (actions[b, 1:] - actions[b, :-1]).cpu().numpy()
-                assert all(
-                    d in (1, -3) for d in diffs
-                ), f"non-consecutive actions (seam crossing?): {actions[b]}"
-
-    def test_seq_len_1_shapes(self) -> None:
-        """seq_len=1 should produce (B, 1)-shaped outputs — a degenerate case
-        that should behave identically to a transition sample with an extra
-        time axis. Guards against future refactors breaking the edge case."""
-        per = self._make_per(size=64, n=3)
-        self._fill(per, 50)
-        _, states, actions, rewards, _, dones, weights = per.sample_sequences(4, 1)
-        assert states.shape == (4, 1, 4, 20, 30)
-        assert actions.shape == (4, 1)
-        assert rewards.shape == (4, 1)
-        assert dones.shape == (4, 1)
-        assert weights.shape == (4,)
-
-    def test_priority_updates_affect_sequence_sampling(self) -> None:
-        """A boosted-priority start idx should appear in every batch."""
-        per = self._make_per(size=128, n=1)
-        self._fill(per, 100)
-        tree_idxs, *_ = per.sample_sequences(2, 4)
-        boosted = tree_idxs[0]
-        per.update_priorities(np.array([boosted]), np.array([1e10]))
-
-        for _ in range(15):
-            tree_idxs, *_ = per.sample_sequences(4, 4)
-            assert boosted in tree_idxs
-
-    def test_rejects_sequences_crossing_write_head_when_full(self) -> None:
-        """Buffer at full capacity: a sequence covering point_mem_idx would
-        span a seam between new and stale data. Such starts must be rejected.
-
-        Test realism: in training the buffer is ~1M entries and sequences
-        are ~60 frames, so rejection rate per-sample is ~6e-5. In this
-        test we use capacity=512, seq_len=8 so rejection rate is ~1.5%
-        per element and batch-level rejection probability is very low —
-        the retry loop should succeed on the first try in practice.
-        """
-        per = self._make_per(size=512, n=1)
-        self._fill(per, 2000)  # definitely wrapped
-        assert per.capacity == per.size  # wrapped
-        # Run many samples; confirm the rejection loop returns valid batches.
-        for _ in range(10):
-            _, states, *_ = per.sample_sequences(4, 8)
-            assert states.shape == (4, 8, 4, 20, 30)
-
-    def test_post_wrap_sequences_have_contiguous_actions(self) -> None:
-        """Regression test for round-3 audit: after the buffer wraps, the
-        distance-based seam rejection must catch sequences that straddle
-        the W-1 → W boundary (jump from newest-written to oldest-surviving).
-        Actions are appended as ``i % 4``, so consecutive transitions differ
-        by +1 or -3. A seam-crossing sequence would show a different diff
-        wherever the straddle happens.
-        """
-        per = self._make_per(size=64, n=1)
-        self._fill(per, 500)  # wraps ~8× so write head is well past position 0
-        assert per.capacity == per.size
-
-        # 30 draws × 8 sequences each × 7 diffs = ~1700 diff checks. Previous
-        # (buggy) code only rejected sequences CONTAINING W; a sequence
-        # straddling W via wrap would slip through and produce a non-(+1,-3)
-        # diff. The fixed distance-based check rejects every straddler.
-        for _ in range(30):
-            _, _, actions, *_ = per.sample_sequences(8, seq_len=8)
-            for b in range(actions.shape[0]):
-                diffs = (actions[b, 1:] - actions[b, :-1]).cpu().numpy()
-                assert all(
-                    d in (1, -3) for d in diffs
-                ), f"seam-crossing sequence (wrapped case): actions={actions[b]}"
-
-    def test_start_at_write_head_is_accepted(self) -> None:
-        """Edge case: ``dist == 0`` (start == W) is NOT a seam crossing — the
-        sequence walks forward into oldest-surviving data, all contiguous in
-        time. An over-aggressive distance check (``dist < seq_len``) would
-        reject this; the correct check is ``0 < dist < seq_len``."""
-        per = self._make_per(size=64, n=1)
-        self._fill(per, 500)  # wrapped
-        W = per.point_mem_idx
-        assert W < per.capacity
-
-        # Repeatedly bias the start toward W via priority boost and confirm
-        # it's sampled + returns a valid (no-gap) sequence. We can't easily
-        # force start == W directly without poking internals, so rely on the
-        # draw distribution: with high enough priority on transition W, the
-        # boosted transition will be picked as start on most draws.
-        per.update_priorities(
-            np.array([W + per.st.tree_start]), np.array([1e10]),
-        )
-        found_w_start = False
-        for _ in range(100):
-            tree_idxs, _, actions, *_ = per.sample_sequences(4, seq_len=4)
-            for b in range(actions.shape[0]):
-                if tree_idxs[b] == W + per.st.tree_start:
-                    found_w_start = True
-                    diffs = (actions[b, 1:] - actions[b, :-1]).cpu().numpy()
-                    assert all(d in (1, -3) for d in diffs), (
-                        f"start-at-W sequence should be valid: actions={actions[b]}"
-                    )
-        assert found_w_start, "priority-boosted W start was never sampled"
-
-    def test_n_step_discount_applied_per_timestep(self) -> None:
-        """With n_step=3 and rewards=1.0 everywhere (no terminal), every
-        element of the returned rewards tensor should be the standard
-        3-step discounted sum 1 + 0.99 + 0.99^2 ≈ 2.9701."""
-        per = self._make_per(size=128, n=3)
-        state = _random_stack()
-        n_state = _random_stack()
-        for _ in range(100):
-            per.append(state, action=0, reward=1.0, n_state=n_state,
-                       done=False, trun=False, stream=0)
-        _, _, _, rewards, _, _, _ = per.sample_sequences(2, 5)
-        expected = 1.0 + 0.99 + 0.99**2
-        assert torch.allclose(
-            rewards, torch.full_like(rewards, expected), atol=1e-5
         )
 
     def test_compute_discounted_rewards_breaks_on_done(self) -> None:
