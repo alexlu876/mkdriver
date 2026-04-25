@@ -1591,9 +1591,17 @@ def _train_vector(
         t.start()
     try:
         # Main-thread loop: drive learn_step + checkpointing + warmup logging.
-        last_learn_env_steps = 0
-        last_warmup_log_env_steps = 0
-        last_ckpt_grad_steps = -1
+        # On RESUME (agent loaded from ckpt), agent.env_steps and agent.grad_steps
+        # carry forward the prior run's progress. We seed last_learn_env_steps to
+        # match so the loop computes ``delta = 0`` and doesn't grind through a
+        # spurious ~agent.env_steps backlog of learn_steps. Without this, after a
+        # 800K-step resume the main thread would do ~16h of catch-up learn_steps
+        # at 4:1 ratio, starving the rollout threads via agent_lock the whole time.
+        # Same reasoning for last_ckpt_grad_steps — seed to current to avoid an
+        # immediate redundant save on startup.
+        last_learn_env_steps = agent.env_steps
+        last_warmup_log_env_steps = agent.env_steps
+        last_ckpt_grad_steps = agent.grad_steps
         last_x11_cleanup_time = time.time()
         log_cadence = cfg.log_every_grad_steps
         try:
