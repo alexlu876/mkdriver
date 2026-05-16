@@ -113,10 +113,17 @@ class TestUpdate:
         # After 200 iterations with α=0.1, we're ~1-0.9^200 ≈ ~100% converged.
         assert s.progress["a"] == pytest.approx(5.0, abs=1e-6)
 
-    def test_unknown_slug_raises(self) -> None:
+    def test_unknown_slug_silently_ignored(self) -> None:
+        """update() with a slug the sampler doesn't know should be a no-op,
+        not a raise. A rollout worker can have an in-flight episode on a
+        track that gets ``remove_track``'d (crash-counter disqualification)
+        between sample() and update(); raising would kill the worker thread
+        and silently stall multi-env runs (observed 2026-05-03)."""
         s = ProgressWeightedTrackSampler(track_slugs=["a", "b"])
-        with pytest.raises(KeyError, match="unknown track slug"):
-            s.update("ghost_track", 5.0)
+        s.update("ghost_track", 5.0)  # no exception
+        # known tracks should be untouched
+        assert s.progress["a"] == 0.0
+        assert s.progress["b"] == 0.0
 
     def test_update_preserves_other_tracks(self) -> None:
         s = ProgressWeightedTrackSampler(track_slugs=["a", "b", "c"])
@@ -148,7 +155,9 @@ class TestWeightFormula:
         """The track with lowest progress should be sampled disproportionately."""
         s = ProgressWeightedTrackSampler(
             track_slugs=["easy", "hard"],
-            config=TrackSamplerConfig(epsilon=0.1, ema_alpha=1.0),
+            # min_samples_per_track=0 disables the cold-start uniform pass
+            # so weight-based sampling kicks in immediately.
+            config=TrackSamplerConfig(epsilon=0.1, ema_alpha=1.0, min_samples_per_track=0),
             seed=0,
         )
         s.update("easy", 10.0)

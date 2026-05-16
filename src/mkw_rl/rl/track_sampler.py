@@ -72,6 +72,17 @@ class TrackSamplerConfig:
     # "hardest" until they prove otherwise.
     cold_start_progress: float = 0.0
 
+    # Minimum episodes per track before progress-weighting kicks in.
+    # Below this threshold, sample(...) picks uniformly among the tracks
+    # with the FEWEST episodes (breaks ties by RNG). Without this, a track
+    # with 2 episodes (less-negative EMA) and another with 30 episodes
+    # (well-converged negative EMA) get a 100×+ sampling ratio favoring
+    # the latter — the cold-start variance dominates the curriculum signal.
+    # Once every track has ≥ this many episodes, normal weighting takes
+    # over. 10 is roughly two ema half-lives at α=0.05 (ln 0.5 / ln 0.95
+    # ≈ 13.5 → samples 1-13 are the "noisy" range).
+    min_samples_per_track: int = 10
+
 
 @dataclass
 class ProgressWeightedTrackSampler:
@@ -113,6 +124,8 @@ class ProgressWeightedTrackSampler:
     seed: int | None = None
 
     progress: dict[str, float] = field(init=False)
+    _visited: set[str] = field(init=False)
+    _episode_count: dict[str, int] = field(init=False)
     _rng: np.random.Generator = field(init=False)
 
     def __post_init__(self) -> None:
@@ -129,6 +142,8 @@ class ProgressWeightedTrackSampler:
         if len(self.progress) != len(self.track_slugs):
             dupes = [s for s in self.track_slugs if self.track_slugs.count(s) > 1]
             raise ValueError(f"duplicate track slugs not allowed: {sorted(set(dupes))}")
+        self._visited = set()
+        self._episode_count = {slug: 0 for slug in self.track_slugs}
         self._rng = np.random.default_rng(self.seed)
 
     # ------------------------------------------------------------------
@@ -157,7 +172,23 @@ class ProgressWeightedTrackSampler:
         return {slug: val / total for slug, val in w.items()}
 
     def sample(self) -> str:
-        """Draw the next track slug to train on."""
+        """Draw the next track slug to train on.
+
+        Cold-start fix (2026-05-02): until every track has at least
+        ``min_samples_per_track`` completed episodes, sample uniformly
+        among the tracks with the FEWEST episodes (breaks ties by RNG).
+        Without this, a track with 2 episodes (less-negative EMA than
+        random-policy converged tracks) gets weight ≈ ε while peers get
+        weight ≈ 15, producing a 150× sampling skew that starves cold
+        tracks indefinitely. Force balanced exposure during early training
+        so EMA estimates are comparable when progress-weighting takes over.
+        """
+        floor = self.config.min_samples_per_track
+        below_floor = [s for s, n in self._episode_count.items() if n < floor]
+        if below_floor:
+            min_count = min(self._episode_count[s] for s in below_floor)
+            tied = [s for s in below_floor if self._episode_count[s] == min_count]
+            return str(self._rng.choice(tied))
         slugs = list(self.progress.keys())
         weights = self.weights()
         probs = np.array([weights[s] for s in slugs], dtype=np.float64)
@@ -175,13 +206,17 @@ class ProgressWeightedTrackSampler:
         the policy's current progress on each track.
         """
         if track_slug not in self.progress:
-            raise KeyError(
-                f"unknown track slug {track_slug!r}; sampler was constructed "
-                f"with {sorted(self.progress)}"
-            )
+            # Race-safe: a track may be ``remove_track``'d by the crash-counter
+            # logic while a rollout worker has an in-flight episode on it.
+            # Returning silently lets the worker complete and pick a new slug
+            # next iteration. Pre-2026-05-03 this raised KeyError, which
+            # killed the rollout thread and silently stalled the run.
+            return
         alpha = self.config.ema_alpha
         prev = self.progress[track_slug]
         self.progress[track_slug] = (1.0 - alpha) * prev + alpha * float(episode_return)
+        self._visited.add(track_slug)
+        self._episode_count[track_slug] = self._episode_count.get(track_slug, 0) + 1
 
     def reset(self) -> None:
         """Wipe all per-track progress back to ``cold_start_progress``.
@@ -197,6 +232,8 @@ class ProgressWeightedTrackSampler:
         """
         for slug in self.progress:
             self.progress[slug] = self.config.cold_start_progress
+            self._episode_count[slug] = 0
+        self._visited.clear()
 
     # ------------------------------------------------------------------
     # Introspection helpers — for tests + debugging.
@@ -216,6 +253,7 @@ class ProgressWeightedTrackSampler:
             )
         self.track_slugs = [*self.track_slugs, slug]
         self.progress[slug] = self.config.cold_start_progress
+        self._episode_count[slug] = 0
 
     @property
     def n_tracks(self) -> int:
@@ -240,6 +278,8 @@ class ProgressWeightedTrackSampler:
         """
         return {
             "progress": dict(self.progress),
+            "visited": sorted(self._visited),
+            "episode_count": dict(self._episode_count),
             "rng_state": self._rng.bit_generator.state,
         }
 
@@ -252,6 +292,28 @@ class ProgressWeightedTrackSampler:
         for slug, p in state["progress"].items():
             if slug in self.progress:
                 self.progress[slug] = float(p)
+        # Tracks that were visited at save time keep their visited flag —
+        # only when present in the current sampler. Old saves without the
+        # field default to "all known tracks already visited" so we don't
+        # spuriously re-trigger the cold-start uniform pass on resume.
+        saved_visited = state.get("visited")
+        if saved_visited is None:
+            self._visited = set(self.progress.keys())
+        else:
+            self._visited = {s for s in saved_visited if s in self.progress}
+        # Episode count: pre-2026-05-02 saves don't have it. Default to
+        # min_samples_per_track for already-visited tracks so we don't
+        # spuriously re-trigger the floor-uniform sampling on resume.
+        saved_counts = state.get("episode_count")
+        if saved_counts is None:
+            floor = self.config.min_samples_per_track
+            self._episode_count = {
+                s: floor if s in self._visited else 0 for s in self.progress
+            }
+        else:
+            self._episode_count = {
+                s: int(saved_counts.get(s, 0)) for s in self.progress
+            }
         self._rng.bit_generator.state = state["rng_state"]
 
     def remove_track(self, slug: str) -> None:
@@ -265,6 +327,8 @@ class ProgressWeightedTrackSampler:
         if slug not in self.progress:
             raise KeyError(f"track {slug!r} not present in sampler")
         del self.progress[slug]
+        self._visited.discard(slug)
+        self._episode_count.pop(slug, None)
         self.track_slugs = [s for s in self.track_slugs if s != slug]
         if not self.progress:
             raise RuntimeError(

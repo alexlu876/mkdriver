@@ -30,6 +30,8 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import random
+import re
 import signal
 import subprocess
 import tempfile
@@ -69,6 +71,16 @@ _DEFAULT_DOLPHIN_APP = (
 _DEFAULT_ISO = Path.home() / "code" / "mkw" / "Wii-RL" / "game" / "mkw.iso"
 _DEFAULT_SAVESTATE_DIR = Path(__file__).resolve().parents[3] / "data" / "savestates"
 _SLAVE_SCRIPT = Path(__file__).resolve().parent / "dolphin_script.py"
+
+# Multi-capture savestates from ``scripts/record_savestates.py`` are named
+# ``{slug}_NNN.sav`` where NNN is a 3+ digit zero-padded index. Strip that
+# suffix to recover the track slug.
+_CAPTURE_SUFFIX_RE = re.compile(r"^(.+?)_\d{3,}$")
+
+
+def _strip_capture_suffix(stem: str) -> str:
+    m = _CAPTURE_SUFFIX_RE.match(stem)
+    return m.group(1) if m else stem
 
 
 class MkwDolphinEnv(gym.Env):
@@ -144,7 +156,9 @@ class MkwDolphinEnv(gym.Env):
         per missing slug. Logging loudly at construction time lets the user
         fix the YAML/savestate discrepancy BEFORE training burns cycles.
         """
-        on_disk = {p.stem for p in self.savestate_dir.glob("*.sav")}
+        # Strip ``_NNN`` (3+ digit) suffix to recover slug from multi-capture
+        # filenames. Legacy single-file ``{slug}.sav`` still maps to its stem.
+        on_disk = {_strip_capture_suffix(p.stem) for p in self.savestate_dir.glob("*.sav")}
         in_yaml = set(self.track_metadata.keys())
         missing_yaml = on_disk - in_yaml
         missing_savestate = in_yaml - on_disk
@@ -411,12 +425,20 @@ class MkwDolphinEnv(gym.Env):
         if track_slug not in self.track_metadata:
             raise KeyError(f"unknown track slug: {track_slug!r}")
 
-        savestate_path = self.savestate_dir / f"{track_slug}.sav"
-        if not savestate_path.exists():
+        # Support both legacy single-file ({slug}.sav) and multi-capture
+        # ({slug}_NNN.sav, NNN = 001..012) layouts. When multiple are present,
+        # pick one uniformly at random per episode for training-data variety.
+        candidates = sorted(self.savestate_dir.glob(f"{track_slug}_*.sav"))
+        legacy_path = self.savestate_dir / f"{track_slug}.sav"
+        if legacy_path.exists():
+            candidates.append(legacy_path)
+        if not candidates:
             raise FileNotFoundError(
-                f"no savestate for track {track_slug!r} at {savestate_path}. "
-                "Record it via scripts/record_savestates.py first."
+                f"no savestate(s) for track {track_slug!r} under {self.savestate_dir}. "
+                f"Record via scripts/record_savestates.py first; expected "
+                f"{track_slug}.sav or {track_slug}_NNN.sav."
             )
+        savestate_path = random.choice(candidates)
 
         meta_dict = asdict(self.track_metadata[track_slug])
         self._conn.send(("reset", str(savestate_path), meta_dict))
@@ -545,7 +567,7 @@ def available_tracks(
     the same path used when constructing ``MkwDolphinEnv``.
     """
     d = Path(savestate_dir) if savestate_dir else _DEFAULT_SAVESTATE_DIR
-    on_disk = sorted(p.stem for p in d.glob("*.sav"))
+    on_disk = sorted({_strip_capture_suffix(p.stem) for p in d.glob("*.sav")})
     if track_metadata_path is None:
         return on_disk
     meta = load_track_metadata(track_metadata_path)

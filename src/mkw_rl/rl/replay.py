@@ -294,18 +294,21 @@ class PER:
         )
 
         # pointer_mem: each entry holds indices into state_mem for the stack
-        # and n_stack, plus indices into reward_mem for the n-step reward window.
+        # and n_stack, plus indices into reward_mem for the n-step reward
+        # window. int32 not int64 — storage_size <= 1.75M < 2^31, so 4 bytes
+        # per pointer suffices and saves ~77 MB host RAM at prod scale
+        # (1.75M slots × 11 ints × 4 bytes vs 8 bytes).
         self.trans_dtype = np.dtype(
             [
-                ("state", int, self.framestack),
-                ("n_state", int, self.framestack),
-                ("reward", int, self.n_step),
+                ("state", np.int32, self.framestack),
+                ("n_state", np.int32, self.framestack),
+                ("reward", np.int32, self.n_step),
             ]
         )
         self.blank_trans = (
-            np.zeros(self.framestack, dtype=int),
-            np.zeros(self.framestack, dtype=int),
-            np.zeros(self.n_step, dtype=int),
+            np.zeros(self.framestack, dtype=np.int32),
+            np.zeros(self.framestack, dtype=np.int32),
+            np.zeros(self.n_step, dtype=np.int32),
         )
         self.pointer_mem = np.array([self.blank_trans] * size, dtype=self.trans_dtype)
 
@@ -359,9 +362,9 @@ class PER:
             reward_array = self.reward_buffer[stream][: self.n_step]
 
             self.pointer_mem[self.point_mem_idx] = (
-                np.array(state_array, dtype=int),
-                np.array(n_state_array, dtype=int),
-                np.array(reward_array, dtype=int),
+                np.array(state_array, dtype=np.int32),
+                np.array(n_state_array, dtype=np.int32),
+                np.array(reward_array, dtype=np.int32),
             )
             # self._set_priority_min(self.point_mem_idx, sqrt(self.max_prio))
             self.st.append(self.max_prio**self.alpha)
@@ -392,9 +395,9 @@ class PER:
                 reward_array.extend([0])
 
             self.pointer_mem[self.point_mem_idx] = (
-                np.array(first_array, dtype=int),
-                np.array(second_array, dtype=int),
-                np.array(reward_array, dtype=int),
+                np.array(first_array, dtype=np.int32),
+                np.array(second_array, dtype=np.int32),
+                np.array(reward_array, dtype=np.int32),
             )
             self.st.append(self.max_prio**self.alpha)
 

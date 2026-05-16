@@ -191,6 +191,7 @@ class BTRPolicy(nn.Module):
         frames: torch.Tensor,
         hidden: LstmState | None = None,
         advantages_only: bool = False,
+        num_tau: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, LstmState]:
         if frames.ndim != 5:
             raise ValueError(
@@ -214,8 +215,13 @@ class BTRPolicy(nn.Module):
         lstm_out, new_hidden = self.lstm(features, hidden)
         # lstm_out: (B, T, lstm_hidden)
 
-        # IQN — sample taus and compute per-quantile Q-values.
-        num_tau = self.cfg.num_tau
+        # IQN — sample taus and compute per-quantile Q-values. Caller can
+        # override ``num_tau`` to use fewer/more samples than config (e.g.,
+        # rollout act() can pass num_tau=1 since action selection only needs
+        # argmax of the mean Q which converges in expectation; learn_step
+        # needs num_tau≥8 for the quantile loss).
+        if num_tau is None:
+            num_tau = self.cfg.num_tau
         # Use .reshape (not .view) because lstm_out may be non-contiguous after
         # the cuDNN LSTM kernel on some backends; reshape falls back to copy
         # when stride doesn't permit a view. Shape: (B*T, lstm_hidden).
@@ -245,10 +251,16 @@ class BTRPolicy(nn.Module):
         frames: torch.Tensor,
         hidden: LstmState | None = None,
         advantages_only: bool = False,
+        num_tau: int | None = None,
     ) -> tuple[torch.Tensor, LstmState]:
-        """Return mean-quantile Q-values: (B, T, n_actions). Used for action selection."""
+        """Return mean-quantile Q-values: (B, T, n_actions). Used for action selection.
+
+        ``num_tau`` defaults to the config value; callers performing greedy
+        rollout (argmax) can pass ``1`` to skip the quantile averaging — argmax
+        of a single τ sample equals argmax of the mean in expectation.
+        """
         quantiles, _taus, new_hidden = self.forward(
-            frames, hidden=hidden, advantages_only=advantages_only
+            frames, hidden=hidden, advantages_only=advantages_only, num_tau=num_tau
         )
         return quantiles.mean(dim=2), new_hidden
 

@@ -697,8 +697,12 @@ class BTRAgent:
         with torch.no_grad():
             if not deterministic:
                 self.online_net.reset_noise()
+            # num_tau=1: argmax over Q only needs a single τ sample (the mean
+            # over multiple samples just adds noise that the argmax discards
+            # in expectation). Drops cos-embedding + dueling head compute by
+            # ~num_tau× during rollout. Learn_step still uses cfg.num_tau.
             q, new_hidden = self.online_net.q_values(
-                frames.to(self.device), hidden=hidden, advantages_only=True
+                frames.to(self.device), hidden=hidden, advantages_only=True, num_tau=1
             )
         action = int(q.argmax(dim=-1).item())
         return action, new_hidden
@@ -1015,7 +1019,15 @@ def _save_checkpoint(
     # pickle <4 has a 4 GB limit per string and torch.save's default hits it.
     # Protocol 4 raises the limit to 2^64 bytes. Harmless for replay-less
     # ckpts (they're ~55 MB total and far under any protocol's limit).
-    torch.save(payload, path, pickle_protocol=4)
+    #
+    # Atomic write: previous direct ``torch.save(..., path)`` left empty
+    # 0-byte files on disk when the save process was killed mid-write
+    # (observed twice during overnight SIGTERM saves of _final.pt). Write
+    # to a sibling .tmp first, then os.replace which is atomic on Linux —
+    # either the file lands fully or the prior version stays.
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp_path, pickle_protocol=4)
+    os.replace(tmp_path, path)
     log.info(
         "saved checkpoint %s (grad=%d env=%d%s)",
         path, agent.grad_steps, agent.env_steps,
@@ -1247,6 +1259,42 @@ def _install_shutdown_handler() -> tuple[dict[str, bool], callable]:
 # threshold observed on Vast.
 _X11_CLEANUP_INTERVAL_S = 60.0
 
+# Poll for newly-recorded savestates and add them to the curriculum on the
+# fly. User can record more tracks WHILE training runs; within
+# _SAVESTATE_POLL_INTERVAL_S of a new ``{slug}_NNN.sav`` landing on disk,
+# the sampler picks it up and starts including it in the rotation. Avoids
+# losing warmup state for every new track.
+_SAVESTATE_POLL_INTERVAL_S = 60.0
+
+
+def _poll_new_tracks(
+    agent: BTRAgent, cfg: TrainConfig, blacklisted: set[str] | None = None
+) -> list[str]:
+    """Scan savestate dir for slugs not yet in the sampler. Returns the list
+    of newly-added slugs (after invoking ``sampler.add_track`` on each).
+
+    Filtering: a slug is added only if (a) it has at least one ``.sav``
+    on disk, (b) it's present in ``track_metadata.yaml`` (so env.reset
+    won't KeyError), (c) it's not already known to the sampler, and
+    (d) it isn't in ``blacklisted`` (slugs the main loop's crash counter
+    removed for being unstable — re-adding would cause a re-add/re-remove
+    feedback loop with the rollout threads still hitting them).
+    """
+    from mkw_rl.env.dolphin_env import available_tracks  # noqa: PLC0415
+    on_disk_in_yaml = set(
+        available_tracks(
+            savestate_dir=cfg.savestate_dir,
+            track_metadata_path=cfg.track_metadata_path,
+        )
+    )
+    known = set(agent.sampler.track_slugs)
+    blacklist = blacklisted or set()
+    added: list[str] = []
+    for slug in sorted(on_disk_in_yaml - known - blacklist):
+        agent.sampler.add_track(slug)
+        added.append(slug)
+    return added
+
 
 def _pid_alive(pid: int) -> bool:
     """True iff a process with this PID currently exists.
@@ -1425,6 +1473,11 @@ def _train_vector(
     # transient flakes recover.
     track_crash_counts: dict[str, int] = {}
     track_success_streaks: dict[str, int] = {}
+    # Tracks the crash counter has removed from the sampler. The hot-add
+    # poll consults this so it doesn't re-add them just because the .sav
+    # files are still on disk (re-add → re-remove loop kills rollout
+    # threads via sampler.update KeyError if not handled tolerantly).
+    blacklisted_tracks: set[str] = set()
     per_env_crash_streaks: list[int] = [0] * cfg.num_envs
     # MAX_ENV_CRASHES is a "N disasters in a row before we give up" bound.
     # 5 was too tight for multi-hour runs — a cluster of X11-orphan-induced
@@ -1518,12 +1571,14 @@ def _train_vector(
                     try:
                         with agent_lock:
                             agent.sampler.remove_track(track_slug)
+                            blacklisted_tracks.add(track_slug)
                         log.warning(
                             "track %s crashed %d times across envs; removed from sampler",
                             track_slug, track_streak,
                         )
                     except KeyError:
                         # Already removed by another thread — race between duplicate crashes.
+                        blacklisted_tracks.add(track_slug)
                         pass
                     except RuntimeError as rm_exc:
                         # sampler.remove_track raises RuntimeError when the last
@@ -1603,6 +1658,7 @@ def _train_vector(
         last_warmup_log_env_steps = agent.env_steps
         last_ckpt_grad_steps = agent.grad_steps
         last_x11_cleanup_time = time.time()
+        last_savestate_poll_time = time.time()
         log_cadence = cfg.log_every_grad_steps
         try:
             while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
@@ -1692,6 +1748,17 @@ def _train_vector(
                 if time.time() - last_x11_cleanup_time >= _X11_CLEANUP_INTERVAL_S:
                     _cleanup_stale_x11_state()
                     last_x11_cleanup_time = time.time()
+
+                # Hot-add tracks that the user records while training is live.
+                if time.time() - last_savestate_poll_time >= _SAVESTATE_POLL_INTERVAL_S:
+                    with agent_lock:
+                        added = _poll_new_tracks(agent, cfg, blacklisted_tracks)
+                    if added:
+                        log.info(
+                            "added %d newly-recorded track(s) to sampler: %s",
+                            len(added), added,
+                        )
+                    last_savestate_poll_time = time.time()
 
                 # Avoid spinning when nothing changed.
                 time.sleep(0.01)
@@ -1800,6 +1867,7 @@ def train(
     # of clean episodes splits the difference.
     track_crash_counts: dict[str, int] = {}
     track_success_streaks: dict[str, int] = {}
+    blacklisted_tracks: set[str] = set()
     # See _train_vector for the MAX_ENV_CRASHES=20 and MAX_TRACK_CRASHES=20
     # rationales — both relaxed from earlier tight values after
     # X11-orphan-induced crash clusters killed production runs.
@@ -1808,12 +1876,22 @@ def train(
     CRASH_RESET_AFTER_SUCCESSES = 3
     last_warmup_log_env_steps = 0
     last_x11_cleanup_time = time.time()
+    last_savestate_poll_time = time.time()
     # Flag set when learn_step's NaN-streak abort fires. Used in `finally:` to
     # redirect the save to `_diverged.pt` instead of overwriting the last clean
     # `_final.pt` with poisoned weights (which resume would silently re-load).
     aborted_due_to_divergence = False
     try:
         while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
+            # Hot-add tracks the user records mid-training.
+            if time.time() - last_savestate_poll_time >= _SAVESTATE_POLL_INTERVAL_S:
+                added = _poll_new_tracks(agent, cfg, blacklisted_tracks)
+                if added:
+                    log.info(
+                        "added %d newly-recorded track(s) to sampler: %s",
+                        len(added), added,
+                    )
+                last_savestate_poll_time = time.time()
             # Periodic X11 cleanup — same rationale as _train_vector.
             # Single-env loop sweeps at the episode boundary since there's
             # only one rollout and it respects the 300s liveness guard.
@@ -1875,13 +1953,15 @@ def train(
                 if track_crash_counts[track_slug] >= MAX_TRACK_CRASHES:
                     try:
                         agent.sampler.remove_track(track_slug)
+                        blacklisted_tracks.add(track_slug)
                         log.warning(
                             "track %s crashed %d times; removed from sampler. "
                             "Inspect data/savestates/%s.sav for corruption.",
                             track_slug, track_crash_counts[track_slug], track_slug,
                         )
                     except KeyError:
-                        pass  # already removed — race between duplicate crashes
+                        # already removed — race between duplicate crashes
+                        blacklisted_tracks.add(track_slug)
                 try:
                     env.close()
                 except Exception:  # noqa: BLE001 - best-effort cleanup

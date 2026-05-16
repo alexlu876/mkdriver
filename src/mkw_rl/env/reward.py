@@ -43,8 +43,14 @@ class RewardConfig:
     speed_bonus_max: float = 2.0  # clamp so a single fast checkpoint can't dominate
 
     # Per-frame penalties (new in v2; zero in v1).
+    # 2026-05-02 audit: wall_penalty lowered 0.05 → 0.02. At 0.05/frame ×
+    # 50 Hz = 2.5/sec — a sustained wall-grind out-weighed checkpoint
+    # rewards by ~80:1 per second of contact, biasing the agent toward
+    # the v2-flagged "backward driving" local optimum (avoid walls by
+    # not going forward). 0.02 keeps the shaping signal but at a more
+    # sustainable ratio (~30:1 sec).
     offroad_penalty: float = 0.01
-    wall_penalty: float = 0.05
+    wall_penalty: float = 0.02
 
     # Terminal rewards. Kept in the same scale as cumulative checkpoint
     # reward (~1 per lap × laps × speed_bonus ≈ 3-6): a 10.0 finish bonus
