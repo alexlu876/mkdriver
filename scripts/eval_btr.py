@@ -134,8 +134,16 @@ def main() -> int:
     # become stochastic run-to-run even at the same checkpoint. The
     # deterministic=True flag on act() prevents run_one_episode's rollout
     # loop from re-enabling noise via reset_noise() on every step.
+    #
+    # act() forwards through actor_net (post-2026-05-16 lock-split refactor),
+    # so disable_noise must target actor_net. Disabling online_net only
+    # would leave actor_net with whatever ε load_checkpoint propagated via
+    # sync_actor() — non-zero, so "deterministic" eval would still be
+    # stochastic. We disable on both for defensiveness.
+    agent.actor_net.disable_noise()
+    agent.actor_net.train(False)
     agent.online_net.disable_noise()
-    agent.online_net.eval()
+    agent.online_net.train(False)
 
     # NOTE: deliberately NOT calling _cleanup_stale_x11_state() here — eval
     # often runs alongside a live trainer on the same box, and the cleanup

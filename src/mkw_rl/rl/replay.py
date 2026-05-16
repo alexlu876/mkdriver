@@ -508,29 +508,28 @@ class PER:
         prios, idxs, tree_idxs = self.st.find(samples)
         probs = prios / p_total
 
-        # Dereference the pointer table.
+        # Dereference the pointer table. ``pointer_mem`` is a structured
+        # ndarray (trans_dtype with named fields), so vectorized field
+        # access ``pointers["state"]`` is ~10–50× cheaper than the prior
+        # ``np.array([p[0] for p in pointers])`` Python loop on a 256-row
+        # batch — the loop allocates B intermediate tuples per batch.
         pointers = self.pointer_mem[idxs]
-        state_pointers = np.array([p[0] for p in pointers])
-        n_state_pointers = np.array([p[1] for p in pointers])
+        state_pointers = pointers["state"]      # (B, framestack) int32
+        n_state_pointers = pointers["n_state"]  # (B, framestack) int32
+        reward_window = pointers["reward"]      # (B, n_step) int32
 
-        # Action is always the FIRST step of the n-step window. Use p[2][0]
-        # uniformly regardless of n_step: for n_step=1, p[2] is a length-1
-        # array and [0] gives the scalar; for n_step>1, [0] picks the first
-        # of the n rewards' corresponding action index.
-        # VIPTankz's conditional branch (BTR.py:599-602) caused a shape bug
-        # when n_step=1 — action_pointers ended up (B, 1) instead of (B,),
-        # propagating through to actions/rewards/dones as (B, 1) tensors.
-        # Unifying the path fixes it for both branches.
-        action_pointers = np.array([p[2][0] for p in pointers])
+        # Action is always the FIRST step of the n-step window. Indexing
+        # uniformly handles n_step=1 (where reward_window is (B, 1)) and
+        # n_step>1 alike. VIPTankz's conditional branch (BTR.py:599-602)
+        # caused a shape bug at n_step=1 — kept unified to avoid it.
+        action_pointers = reward_window[:, 0]
+        reward_pointers = reward_window if self.n_step > 1 else action_pointers
 
-        if self.n_step > 1:
-            reward_pointers = np.array([p[2] for p in pointers])
-        else:
-            # n=1: reward index is the same as the action index.
-            reward_pointers = action_pointers
-
-        states = torch.tensor(self.state_mem[state_pointers], dtype=torch.uint8)
-        n_states = torch.tensor(self.state_mem[n_state_pointers], dtype=torch.uint8)
+        # Frames stay uint8; BTRPolicy.forward does .float()/255 internally.
+        # torch.from_numpy is zero-copy when dtype matches; we contiguify
+        # only if the fancy-indexing result isn't already C-contiguous.
+        states = torch.from_numpy(np.ascontiguousarray(self.state_mem[state_pointers])).to(self.device)
+        n_states = torch.from_numpy(np.ascontiguousarray(self.state_mem[n_state_pointers])).to(self.device)
 
         rewards = self.reward_mem[reward_pointers]
         dones = self.done_mem[reward_pointers]
@@ -544,11 +543,9 @@ class PER:
         # rather than beta was an accident that empirically performs better.
         # Kept verbatim; parameter semantics are VIPTankz-canonical.
         weights = (self.capacity * probs) ** -self.alpha
-        weights = torch.tensor(
-            weights / weights.max(),
-            dtype=torch.float32,
-            device=self.device,
-        )
+        weights = torch.from_numpy(
+            np.ascontiguousarray(weights / weights.max(), dtype=np.float32)
+        ).to(self.device)
 
         if torch.isnan(weights).any():
             # Rare: sampled outside the filled range before the buffer was full.
@@ -557,15 +554,9 @@ class PER:
                 raise RuntimeError("PER sample() produced NaN weights after retries")
             return self.sample(batch_size, count + 1)
 
-        # Keep frames as uint8 on device — BTRPolicy.forward does the
-        # .float()/255 conversion internally. Casting to float32 here would
-        # quadruple GPU memory for the batch staging tensors (uint8 → fp32)
-        # for no benefit; see the 2026-04-23 memory audit.
-        states = states.to(self.device)
-        n_states = n_states.to(self.device)
-        rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-        dones = torch.tensor(dones, dtype=torch.bool, device=self.device)
-        actions = torch.tensor(actions, dtype=torch.int64, device=self.device)
+        rewards = torch.from_numpy(np.ascontiguousarray(rewards, dtype=np.float32)).to(self.device)
+        dones = torch.from_numpy(np.ascontiguousarray(dones)).to(device=self.device, dtype=torch.bool)
+        actions = torch.from_numpy(np.ascontiguousarray(actions)).to(device=self.device, dtype=torch.int64)
 
         # Stored-hidden lookup. h_mem/c_mem are (storage_size, lstm_layers,
         # lstm_hidden) fp16; the batch lookup returns (B, lstm_layers,
@@ -574,8 +565,12 @@ class PER:
         # network runs in fp32 (or bf16 via autocast, which handles the cast).
         h_batch = self.h_mem[action_pointers]  # (B, L, H) fp16
         c_batch = self.c_mem[action_pointers]
-        h_t = torch.tensor(h_batch, dtype=torch.float32, device=self.device).transpose(0, 1)
-        c_t = torch.tensor(c_batch, dtype=torch.float32, device=self.device).transpose(0, 1)
+        h_t = torch.from_numpy(np.ascontiguousarray(h_batch)).to(
+            device=self.device, dtype=torch.float32
+        ).transpose(0, 1)
+        c_t = torch.from_numpy(np.ascontiguousarray(c_batch)).to(
+            device=self.device, dtype=torch.float32
+        ).transpose(0, 1)
         hiddens = (h_t.contiguous(), c_t.contiguous())
 
         return tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens

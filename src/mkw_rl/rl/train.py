@@ -566,7 +566,28 @@ def _compute_munchausen_reward(
 
 @dataclass
 class BTRAgent:
-    """Training-time wrapper around policy + target + optimizer + replay."""
+    """Training-time wrapper around policy + target + optimizer + replay.
+
+    Concurrency model (2026-05-16 actor-net snapshot refactor):
+        - ``online_net`` is the trainable copy. Mutated by ``learn_step``.
+        - ``actor_net`` is a deepcopy used by rollout ``act()``. Refreshed
+          periodically by ``sync_actor()``. Never trained — no grad, perma-eval.
+        - ``target_net`` is the Q-bootstrap target. Refreshed by ``sync_target``.
+
+        Two narrow locks replace the prior single ``agent_lock``:
+        - ``_replay_lock`` — wraps ``replay.append/sample/update_priorities``
+          and ``env_steps`` writes. Mutual exclusion of these is required for
+          PER correctness (sum-tree races).
+        - ``_actor_lock`` — wraps ``act()`` forwards and ``sync_actor()`` writes
+          to actor_net.
+
+        ``learn_step``'s forward/backward/optimizer runs **without** any lock,
+        because it only touches ``online_net``/``target_net`` and gradients,
+        which rollouts no longer read. Sampled tensors are materialized into
+        local GPU memory before releasing ``_replay_lock``, so a concurrent
+        ``append()`` that overwrites state_mem slots can't poison the in-flight
+        learn batch.
+    """
 
     cfg: TrainConfig
     online_net: BTRPolicy
@@ -585,7 +606,31 @@ class BTRAgent:
     # the Adam moments go NaN across the full net.
     nonfinite_streak: int = field(default=0)
 
+    # Rollout-side network snapshot — see class docstring. Built in
+    # __post_init__ as a deepcopy of online_net.
+    actor_net: BTRPolicy = field(init=False)
+    _replay_lock: threading.Lock = field(init=False, repr=False)
+    _actor_lock: threading.Lock = field(init=False, repr=False)
+    # Sampler ops (add/remove track, update progress, distribution read)
+    # are infrequent but not thread-safe on the underlying dict. Separate
+    # lock so they don't serialize with the much-more-frequent replay path.
+    _sampler_lock: threading.Lock = field(init=False, repr=False)
+
     MAX_NONFINITE: int = 10
+
+    def __post_init__(self) -> None:
+        # Actor net: a permanently-eval, no-grad twin of online_net. Rollouts
+        # read from this; learn_step writes online_net; periodic sync_actor()
+        # copies online_net → actor_net. Decouples rollout latency from
+        # learn_step duration (the prior single-lock design serialized them).
+        self.actor_net = copy.deepcopy(self.online_net)
+        for p in self.actor_net.parameters():
+            p.requires_grad = False
+        self.actor_net.train(False)  # spectral_norm power iter off
+        self.actor_net.disable_noise()  # we re-enable below for stochastic acts
+        self._replay_lock = threading.Lock()
+        self._actor_lock = threading.Lock()
+        self._sampler_lock = threading.Lock()
 
     @classmethod
     def build(cls, cfg: TrainConfig) -> BTRAgent:
@@ -679,6 +724,55 @@ class BTRAgent:
         # refactor that toggles it.
         self.target_net.eval()
 
+    def sync_actor(self) -> None:
+        """Copy online_net weights into actor_net.
+
+        Called by the learner thread once per learn-step chunk. The copy is
+        a torch tensor-by-tensor assignment (~1 ms for BTR-size), much
+        cheaper than the 50-100 ms learn_step body it amortizes against.
+        Rollouts block on ``_actor_lock`` only for the copy's duration.
+        """
+        with self._actor_lock:
+            self.actor_net.load_state_dict(self.online_net.state_dict())
+            # load_state_dict can flip the training flag if the source state
+            # had it set differently — be defensive.
+            self.actor_net.train(False)
+            for p in self.actor_net.parameters():
+                p.requires_grad = False
+
+    def append(
+        self,
+        *,
+        state: "np.ndarray",
+        action: int,
+        reward: float,
+        n_state: "np.ndarray",
+        done: bool,
+        trun: bool,
+        stream: int,
+        hidden: "tuple[np.ndarray, np.ndarray] | None",
+    ) -> None:
+        """Thread-safe replay append + env_steps increment.
+
+        Used by rollout workers in place of holding the prior outer
+        ``agent_lock`` around ``replay.append`` + ``env_steps += 1``.
+        Acquires ``_replay_lock`` which is the same lock used by
+        ``learn_step.sample`` / ``update_priorities``, preserving PER
+        sum-tree atomicity.
+        """
+        with self._replay_lock:
+            self.replay.append(
+                state=state,
+                action=action,
+                reward=reward,
+                n_state=n_state,
+                done=done,
+                trun=trun,
+                stream=stream,
+                hidden=hidden,
+            )
+            self.env_steps += 1
+
     def act(
         self,
         frames: torch.Tensor,
@@ -693,17 +787,26 @@ class BTRAgent:
         at whatever state the caller put it in (typically 0'd via
         ``disable_noise()``). Used by ``scripts/eval_btr.py`` to get
         reproducible greedy rollouts against a frozen checkpoint.
+
+        Forwards through ``actor_net``, not ``online_net``: actor_net is
+        a permanently-eval, no-grad snapshot refreshed periodically by
+        ``sync_actor()``. This lets rollouts run concurrently with
+        learn_step's forward/backward on ``online_net`` — the prior
+        single-lock design serialized them. ``_actor_lock`` only protects
+        against concurrent ``sync_actor()`` writes (brief, ~1 ms), not
+        against learn_step.
         """
-        with torch.no_grad():
-            if not deterministic:
-                self.online_net.reset_noise()
-            # num_tau=1: argmax over Q only needs a single τ sample (the mean
-            # over multiple samples just adds noise that the argmax discards
-            # in expectation). Drops cos-embedding + dueling head compute by
-            # ~num_tau× during rollout. Learn_step still uses cfg.num_tau.
-            q, new_hidden = self.online_net.q_values(
-                frames.to(self.device), hidden=hidden, advantages_only=True, num_tau=1
-            )
+        with self._actor_lock:
+            with torch.no_grad():
+                if not deterministic:
+                    self.actor_net.reset_noise()
+                # num_tau=1: argmax over Q only needs a single τ sample (the mean
+                # over multiple samples just adds noise that the argmax discards
+                # in expectation). Drops cos-embedding + dueling head compute by
+                # ~num_tau× during rollout. Learn_step still uses cfg.num_tau.
+                q, new_hidden = self.actor_net.q_values(
+                    frames.to(self.device), hidden=hidden, advantages_only=True, num_tau=1
+                )
         action = int(q.argmax(dim=-1).item())
         return action, new_hidden
 
@@ -732,120 +835,135 @@ class BTRAgent:
         if self.replay.capacity < self.cfg.min_sampling_size:
             return {}
 
-        tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens = (
-            self.replay.sample(self.cfg.batch_size)
-        )
-        # states/n_states: (B, framestack, H, W) uint8 on device
-        # actions: (B,) int64, rewards/dones: (B,), weights: (B,)
-        # hiddens: (h, c) each (lstm_layers, B, lstm_hidden) float32 on device
+        # Rollout act() forwards through actor_net (a periodically-synced
+        # snapshot), so this train-mode toggle no longer races with rollouts.
+        # Keep it explicit since the prior single-lock design required it.
+        self.online_net.train(True)
 
-        # Add a trivial time dim so the (B, T, stack, H, W) model signature
-        # works unchanged. Free — it's a view, no memory allocated.
-        states = states.unsqueeze(1)
-        n_states = n_states.unsqueeze(1)
-
-        # Noise: resample online before forward; target stays deterministic
-        # (disabled at build and every sync).
-        self.online_net.reset_noise()
-
-        # Online forward at (s_t) with the stored LSTM init.
-        online_quantiles, online_taus, _ = self.online_net(
-            states, hidden=hiddens
-        )
-        # (B, 1, num_tau, n_actions), (B, 1, num_tau, 1)
-
-        # Target forward at s_{t+n} with zero-init hidden. No grad.
-        with torch.no_grad():
-            target_quantiles, _, _ = self.target_net(n_states, hidden=None)
-
-        # Squeeze the trivial T dim so the loss math matches VIPTankz's
-        # original single-step shape contract.
-        online_q = online_quantiles.squeeze(1)  # (B, num_tau, n_actions)
-        online_tau = online_taus.squeeze(1)     # (B, num_tau, 1)
-        target_q = target_quantiles.squeeze(1)
-        dones_ = dones.unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1)
-
-        # Munchausen reward (needs online Q at current state, detached).
-        munch_reward = _compute_munchausen_reward(
-            online_q.detach(),
-            rewards,
-            actions,
-            self.cfg.entropy_tau,
-            self.cfg.munch_alpha,
-            self.cfg.munch_lo,
-        )
-
-        loss, td_abs = _compute_td_error_and_loss(
-            online_q,
-            online_tau,
-            target_q,
-            actions,
-            munch_reward,
-            gamma_n=self.cfg.gamma**self.cfg.n_step,
-            dones=dones_,
-            weights=weights,
-            entropy_tau=self.cfg.entropy_tau,
-        )
-
-        # NaN/inf guard: entropy_tau=0.03 + outlier Q can overflow logsumexp.
-        # Skip the step rather than poisoning weights with a NaN Adam moment.
-        if not torch.isfinite(loss):
-            self.nonfinite_streak += 1
-            log.warning(
-                "non-finite loss at grad_step=%d (streak=%d/%d); skipping step",
-                self.grad_steps, self.nonfinite_streak, self.MAX_NONFINITE,
+        # Hold _replay_lock for the ENTIRE learn_step body. We need the
+        # sample → update_priorities pair to be atomic w.r.t. concurrent
+        # append() calls from rollout threads: append() writes to the
+        # sum-tree at slots that may wrap onto our sampled tree_idxs, and
+        # our final update_priorities() would silently clobber any such
+        # fresh priority with a stale TD error from the pre-wrap transition.
+        # The cost is ~learn_step duration of rollout-append blocking — we
+        # accept this since rollout act() / env.step() are decoupled from
+        # learn_step via actor_net, which is the dominant throughput win.
+        with self._replay_lock:
+            tree_idxs, states, actions, rewards, n_states, dones, weights, hiddens = (
+                self.replay.sample(self.cfg.batch_size)
             )
-            if self.nonfinite_streak >= self.MAX_NONFINITE:
-                raise RuntimeError(
-                    f"aborting: {self.MAX_NONFINITE} consecutive non-finite losses. "
-                    "Training likely diverged; inspect recent metrics + replay state."
-                )
-            return {"loss": float("nan"), "grad_norm": float("nan"),
-                    "grad_steps": self.grad_steps, "nonfinite_streak": self.nonfinite_streak}
+            # states/n_states: (B, framestack, H, W) uint8 on device
+            # actions: (B,) int64, rewards/dones: (B,), weights: (B,)
+            # hiddens: (h, c) each (lstm_layers, B, lstm_hidden) float32 on device
 
-        # Backward + clip + step.
-        self.optimizer.zero_grad()
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.online_net.parameters(), self.cfg.grad_clip
-        ).item()
-        if not np.isfinite(grad_norm):
-            self.nonfinite_streak += 1
-            log.warning(
-                "non-finite grad_norm at grad_step=%d (streak=%d/%d); skipping step",
-                self.grad_steps, self.nonfinite_streak, self.MAX_NONFINITE,
+            # Add a trivial time dim so the (B, T, stack, H, W) model signature
+            # works unchanged. Free — it's a view, no memory allocated.
+            states = states.unsqueeze(1)
+            n_states = n_states.unsqueeze(1)
+
+            # Noise: resample online before forward; target stays deterministic
+            # (disabled at build and every sync).
+            self.online_net.reset_noise()
+
+            # Online forward at (s_t) with the stored LSTM init.
+            online_quantiles, online_taus, _ = self.online_net(
+                states, hidden=hiddens
             )
-            if self.nonfinite_streak >= self.MAX_NONFINITE:
-                raise RuntimeError(
-                    f"aborting: {self.MAX_NONFINITE} consecutive non-finite grad_norms"
+            # (B, 1, num_tau, n_actions), (B, 1, num_tau, 1)
+
+            # Target forward at s_{t+n} with zero-init hidden. No grad.
+            with torch.no_grad():
+                target_quantiles, _, _ = self.target_net(n_states, hidden=None)
+
+            # Squeeze the trivial T dim so the loss math matches VIPTankz's
+            # original single-step shape contract.
+            online_q = online_quantiles.squeeze(1)  # (B, num_tau, n_actions)
+            online_tau = online_taus.squeeze(1)     # (B, num_tau, 1)
+            target_q = target_quantiles.squeeze(1)
+            dones_ = dones.unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1)
+
+            # Munchausen reward (needs online Q at current state, detached).
+            munch_reward = _compute_munchausen_reward(
+                online_q.detach(),
+                rewards,
+                actions,
+                self.cfg.entropy_tau,
+                self.cfg.munch_alpha,
+                self.cfg.munch_lo,
+            )
+
+            loss, td_abs = _compute_td_error_and_loss(
+                online_q,
+                online_tau,
+                target_q,
+                actions,
+                munch_reward,
+                gamma_n=self.cfg.gamma**self.cfg.n_step,
+                dones=dones_,
+                weights=weights,
+                entropy_tau=self.cfg.entropy_tau,
+            )
+
+            # NaN/inf guard: entropy_tau=0.03 + outlier Q can overflow logsumexp.
+            # Skip the step rather than poisoning weights with a NaN Adam moment.
+            if not torch.isfinite(loss):
+                self.nonfinite_streak += 1
+                log.warning(
+                    "non-finite loss at grad_step=%d (streak=%d/%d); skipping step",
+                    self.grad_steps, self.nonfinite_streak, self.MAX_NONFINITE,
                 )
-            # Grads are NaN; zero them so the Adam moments don't get poisoned.
+                if self.nonfinite_streak >= self.MAX_NONFINITE:
+                    raise RuntimeError(
+                        f"aborting: {self.MAX_NONFINITE} consecutive non-finite losses. "
+                        "Training likely diverged; inspect recent metrics + replay state."
+                    )
+                return {"loss": float("nan"), "grad_norm": float("nan"),
+                        "grad_steps": self.grad_steps, "nonfinite_streak": self.nonfinite_streak}
+
+            # Backward + clip + step.
             self.optimizer.zero_grad()
-            return {"loss": float(loss.item()), "grad_norm": float("nan"),
-                    "grad_steps": self.grad_steps, "nonfinite_streak": self.nonfinite_streak}
-        self.nonfinite_streak = 0
-        self.optimizer.step()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.online_net.parameters(), self.cfg.grad_clip
+            ).item()
+            if not np.isfinite(grad_norm):
+                self.nonfinite_streak += 1
+                log.warning(
+                    "non-finite grad_norm at grad_step=%d (streak=%d/%d); skipping step",
+                    self.grad_steps, self.nonfinite_streak, self.MAX_NONFINITE,
+                )
+                if self.nonfinite_streak >= self.MAX_NONFINITE:
+                    raise RuntimeError(
+                        f"aborting: {self.MAX_NONFINITE} consecutive non-finite grad_norms"
+                    )
+                # Grads are NaN; zero them so the Adam moments don't get poisoned.
+                self.optimizer.zero_grad()
+                return {"loss": float(loss.item()), "grad_norm": float("nan"),
+                        "grad_steps": self.grad_steps, "nonfinite_streak": self.nonfinite_streak}
+            self.nonfinite_streak = 0
+            self.optimizer.step()
 
-        # Priority update: per-transition |δ|. No R2D2 sequence aggregation
-        # needed (each sample is a single transition).
-        td_abs_np = td_abs.cpu().numpy()  # (B,)
-        self.replay.update_priorities(tree_idxs, td_abs_np)
+            # Priority update: per-transition |δ|. No R2D2 sequence aggregation
+            # needed (each sample is a single transition).
+            td_abs_np = td_abs.cpu().numpy()  # (B,)
+            self.replay.update_priorities(tree_idxs, td_abs_np)
 
-        self.grad_steps += 1
-        if self.grad_steps % self.cfg.target_replace_grad_steps == 0:
-            self.sync_target()
+            self.grad_steps += 1
+            if self.grad_steps % self.cfg.target_replace_grad_steps == 0:
+                self.sync_target()
 
-        return {
-            "loss": float(loss.item()),
-            "td_abs_mean": float(td_abs_np.mean()),
-            "grad_norm": float(grad_norm),
-            "grad_steps": self.grad_steps,
-            # Include on the happy path (always 0 here) so the CSV/wandb
-            # column exists from step 1. Without this, the column only
-            # appears after the first non-finite event, breaking chart
-            # continuity when trying to diagnose divergence retrospectively.
-            "nonfinite_streak": self.nonfinite_streak,
-        }
+            return {
+                "loss": float(loss.item()),
+                "td_abs_mean": float(td_abs_np.mean()),
+                "grad_norm": float(grad_norm),
+                "grad_steps": self.grad_steps,
+                # Include on the happy path (always 0 here) so the CSV/wandb
+                # column exists from step 1. Without this, the column only
+                # appears after the first non-finite event, breaking chart
+                # continuity when trying to diagnose divergence retrospectively.
+                "nonfinite_streak": self.nonfinite_streak,
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -875,9 +993,12 @@ def run_one_episode(
     Multi-env plumbing:
     - ``stream`` is the replay-buffer stream ID = env_id. For single-env runs
       (legacy path) stream=0 matches the old hardcoded value.
-    - ``agent_lock``, if provided, serializes all agent state mutations
-      (``act``, ``learn_step``, ``replay.append``, env_steps increment). Set
-      this in multi-env runs where N rollout threads share one agent.
+    - ``agent_lock`` is deprecated (kept for back-compat with existing
+      callers). Since the 2026-05-16 actor-net snapshot refactor, ``agent``
+      manages two narrow internal locks (``_actor_lock`` for act() and
+      ``_replay_lock`` for append/sample/update_priorities), so no
+      outside-the-agent lock is needed for thread safety. The parameter is
+      accepted but ignored.
     - ``skip_learn``: in multi-env runs the rollout threads only collect
       transitions; the main thread owns the learn-step cadence. Setting this
       to True makes the function pure rollout.
@@ -886,6 +1007,7 @@ def run_one_episode(
 
     Returns (episode_return, reward_component_sums, n_steps).
     """
+    del agent_lock  # deprecated — agent self-locks now
     # Convert per-track-failure exceptions from env.reset into the narrow
     # EnvResetFailed class so the outer train loop catches them alongside
     # socket errors. Keeps the main exception net focused on "env is broken
@@ -902,17 +1024,13 @@ def run_one_episode(
         f"env obs shape {obs.shape} doesn't match "
         f"(framestack={agent.cfg.framestack}, H={agent.cfg.imagey}, W={agent.cfg.imagex})"
     )
-    prev_obs = obs.copy()  # frame_stack at t for replay append (state_t)
+    # env.reset/step already return fresh copies (dolphin_env.py:505); no need to re-copy.
+    prev_obs = obs  # frame_stack at t for replay append (state_t)
     hidden = None
     episode_return = 0.0
     reward_components_sum: dict[str, float] = {}
     step = 0
     log_cadence = agent.cfg.log_every_grad_steps
-
-    # Dummy context manager so the main loop stays readable whether or not
-    # a lock is passed (single-env: nullcontext; multi-env: real Lock).
-    import contextlib  # noqa: PLC0415
-    lock = agent_lock if agent_lock is not None else contextlib.nullcontext()
 
     while True:
         # To tensor for action selection: (1, 1, stack, H, W).
@@ -927,24 +1045,24 @@ def run_one_episode(
             h_np = hidden[0].detach().squeeze(1).to("cpu", dtype=torch.float16).numpy()
             c_np = hidden[1].detach().squeeze(1).to("cpu", dtype=torch.float16).numpy()
             stored_hidden = (h_np, c_np)
-        with lock:
-            action, hidden = agent.act(obs_t, hidden, deterministic=deterministic)
+        # agent.act acquires its own _actor_lock internally — no external
+        # serialization needed even with N rollout threads sharing the agent.
+        action, hidden = agent.act(obs_t, hidden, deterministic=deterministic)
 
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
-        with lock:
-            agent.replay.append(
-                state=prev_obs,
-                action=action,
-                reward=reward,
-                n_state=next_obs,
-                done=bool(terminated),
-                trun=bool(truncated),
-                stream=stream,
-                hidden=stored_hidden,
-            )
-            agent.env_steps += 1
+        # agent.append acquires _replay_lock + bumps env_steps atomically.
+        agent.append(
+            state=prev_obs,
+            action=action,
+            reward=reward,
+            n_state=next_obs,
+            done=bool(terminated),
+            trun=bool(truncated),
+            stream=stream,
+            hidden=stored_hidden,
+        )
         episode_return += reward
 
         rb = info.get("reward_breakdown", {})
@@ -957,8 +1075,10 @@ def run_one_episode(
         # runs we skip this — the main thread drives learning on its own
         # cadence synced to total env_steps across all envs.
         if not skip_learn:
+            did_learn = False
             for _ in range(agent.cfg.replay_ratio):
                 learn_metrics = agent.learn_step()
+                did_learn = did_learn or bool(learn_metrics)
                 if (
                     logger is not None
                     and learn_metrics
@@ -968,8 +1088,15 @@ def run_one_episode(
                 ):
                     learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
                     logger.log(learn_log, step=agent.env_steps)
+            # Single-env path: same thread does rollout + learn, so we sync
+            # the actor here. Without this, the actor_net stays at the
+            # build-time snapshot forever and rollouts ignore all learning.
+            # Cheap (~1 ms) at replay_ratio=1; if replay_ratio jumps higher
+            # we could amortize but it's not the bottleneck.
+            if did_learn:
+                agent.sync_actor()
 
-        prev_obs = next_obs.copy()
+        prev_obs = next_obs
         obs = next_obs
         step += 1
 
@@ -1096,6 +1223,12 @@ def load_checkpoint(agent: BTRAgent, path: Path | str) -> None:
     # values but doesn't set the destination's mode. Re-assert target.eval()
     # to keep spectral_norm power iteration + noise disabled on target.
     agent.target_net.eval()
+    # actor_net was built from the random init in __post_init__ and never
+    # touched by load_state_dict above. Without this sync, rollouts after
+    # resume act with random-policy weights until the first sync_actor()
+    # call in the main loop (single-env: never; multi-env: after warmup +
+    # first learn chunk). Sync now so the resumed agent behaves as expected.
+    agent.sync_actor()
     log.info(
         "resumed from %s: grad_steps=%d env_steps=%d",
         path, agent.grad_steps, agent.env_steps,
@@ -1444,9 +1577,12 @@ def _train_vector(
     Spawns ``cfg.num_envs`` rollout threads, each driving one ``MkwDolphinEnv``
     on its own episode loop. The main thread drives the learn-step cadence
     (1 per total env step at ``replay_ratio=1``, matching single-env
-    semantics), periodic checkpointing, and warmup-progress logging. An
-    ``agent_lock`` serializes every mutation of shared agent state
-    (``act``, ``learn_step``, ``replay.append``, ``env_steps``).
+    semantics), periodic checkpointing, and warmup-progress logging.
+    Synchronization: ``BTRAgent`` owns three narrow locks
+    (``_replay_lock``, ``_actor_lock``, ``_sampler_lock``) which the agent
+    methods acquire as needed. The 2026-05-16 refactor replaced the prior
+    single agent_lock here with this finer split so rollout act() forwards
+    (through ``actor_net``) and learn_step's GPU work no longer serialize.
 
     Crash handling is per-thread: each rollout thread catches its own env
     errors, rebuilds its env, and retries; persistent per-track failures
@@ -1458,7 +1594,6 @@ def _train_vector(
     ``run_one_episode``.
     """
     envs = _make_envs(cfg)
-    agent_lock = threading.Lock()
     shutdown_flag, restore_sigterm = _install_shutdown_handler()
     # Guards crash-counter dict updates from multiple rollout threads.
     crash_lock = threading.Lock()
@@ -1509,7 +1644,11 @@ def _train_vector(
         nonlocal aborted_with_error
         while not shutdown_flag["shutdown"]:
             try:
-                track_slug = agent.sampler.sample()
+                # sampler.sample() mutates RNG state + iterates the progress
+                # dict; concurrent calls from N rollout threads (plus add/
+                # remove/update calls from other paths) need _sampler_lock.
+                with agent._sampler_lock:
+                    track_slug = agent.sampler.sample()
             except Exception as exc:  # noqa: BLE001 — propagate via main thread
                 shutdown_flag["shutdown"] = True
                 aborted_with_error = exc
@@ -1519,7 +1658,7 @@ def _train_vector(
                 ep_return, rb_sums, n_steps = run_one_episode(
                     agent, env_slots[i], track_slug,
                     logger=logger, shutdown_flag=shutdown_flag,
-                    stream=i, agent_lock=agent_lock, skip_learn=True,
+                    stream=i, skip_learn=True,
                 )
                 with crash_lock:
                     per_env_crash_streaks[i] = 0
@@ -1569,7 +1708,7 @@ def _train_vector(
                     return
                 if track_streak >= MAX_TRACK_CRASHES:
                     try:
-                        with agent_lock:
+                        with agent._sampler_lock:
                             agent.sampler.remove_track(track_slug)
                             blacklisted_tracks.add(track_slug)
                         log.warning(
@@ -1577,9 +1716,12 @@ def _train_vector(
                             track_slug, track_streak,
                         )
                     except KeyError:
-                        # Already removed by another thread — race between duplicate crashes.
-                        blacklisted_tracks.add(track_slug)
-                        pass
+                        # Already removed by another thread — race between
+                        # duplicate crashes. Take _sampler_lock for the
+                        # blacklist write so it's atomic w.r.t. the
+                        # _poll_new_tracks reader which also holds it.
+                        with agent._sampler_lock:
+                            blacklisted_tracks.add(track_slug)
                     except RuntimeError as rm_exc:
                         # sampler.remove_track raises RuntimeError when the last
                         # track is removed. There's nothing left to sample, so
@@ -1597,7 +1739,7 @@ def _train_vector(
                 env_slots[i] = _make_env(cfg, env_id=i)
                 continue
 
-            with agent_lock:
+            with agent._sampler_lock:
                 agent.sampler.update(track_slug, ep_return)
             with episode_idx_lock:
                 episode_idx[0] += 1
@@ -1624,7 +1766,7 @@ def _train_vector(
             }
             for comp, val in rb_sums.items():
                 metrics[f"reward/{comp}"] = val
-            with agent_lock:
+            with agent._sampler_lock:
                 for slug, weight in agent.sampler.distribution().items():
                     metrics[f"track_sampler/{slug}/weight"] = weight
             # Best-effort log — if the main thread already closed the logger
@@ -1662,50 +1804,62 @@ def _train_vector(
         log_cadence = cfg.log_every_grad_steps
         try:
             while agent.env_steps < cfg.total_frames and not shutdown_flag["shutdown"]:
-                # Learn-step cadence: one per total env step (matches single-env
-                # replay_ratio=1 semantics scaled across envs). We batch them
-                # together under the lock to avoid fine-grained contention.
-                with agent_lock:
-                    current_env_steps = agent.env_steps
-                    replay_warm = agent.replay.capacity >= cfg.min_sampling_size
+                # Reads of env_steps / replay.capacity are atomic (Python's
+                # GIL guarantees int reads + counter ops). Writers (rollout
+                # append, learn_step) serialize on agent._replay_lock; we
+                # don't need to hold it for a one-shot read.
+                current_env_steps = agent.env_steps
+                replay_warm = agent.replay.capacity >= cfg.min_sampling_size
+
+                if not replay_warm:
+                    # Track current env_steps so when warmup ends, delta starts
+                    # at 0 instead of jumping to ~min_sampling_size. Without
+                    # this, transition-to-learn fires a backlog of
+                    # min_sampling_size / MAX_LEARN_PER_ITER outer iterations
+                    # (~12.5K iters at 200K warmup / 16-per-iter) before
+                    # steady-state learn_step cadence catches up to live env
+                    # stepping. Resume from checkpoint already handles this at
+                    # init (line ~1657); this is the cold-start equivalent.
+                    last_learn_env_steps = current_env_steps
 
                 if replay_warm:
                     delta = current_env_steps - last_learn_env_steps
                     if delta > 0:
-                        # Cap per-outer-iter learn steps. At warmup completion
-                        # delta jumps to ~200K; doing that many learn_step()s
-                        # in one tight loop under the lock (a) starves rollout
-                        # workers of the lock for minutes and (b) accumulates
-                        # PyTorch allocator-cached buffers across iterations
-                        # faster than Python's refcount GC can reclaim them,
-                        # leading to OOM on the first or second learn_step
-                        # regardless of GPU size. Chunking to 16 per outer
-                        # iter gives GC time to run (the outer loop sleeps
-                        # 10ms between iterations) and keeps the lock short.
-                        # At 22 env-steps/sec on 4 envs, 16 learn_steps per
-                        # 10ms + 100ms main-loop cycle catches up in ~3min
-                        # without pathological memory accumulation.
+                        # Cap per-outer-iter learn steps. Each learn_step
+                        # acquires + releases agent._replay_lock internally,
+                        # so this loop now releases the lock between steps
+                        # and rollout appends can interleave. We still cap
+                        # the chunk to keep PyTorch allocator-cached buffers
+                        # from accumulating faster than refcount GC can
+                        # reclaim them (memory pressure), and to give the
+                        # actor_net sync below a chance to refresh between
+                        # bursts.
                         MAX_LEARN_PER_ITER = 16
                         chunk = min(delta, MAX_LEARN_PER_ITER)
-                        with agent_lock:
-                            for _ in range(chunk * cfg.replay_ratio):
-                                # Respect shutdown mid-batch. Without this, a
-                                # NaN-triggered shutdown (or user SIGTERM) can
-                                # grind through hundreds more learn_step()
-                                # calls on poisoned weights before the outer
-                                # loop's shutdown check fires, stomping the
-                                # _diverged.pt save with even worse state.
-                                if shutdown_flag["shutdown"]:
-                                    break
-                                learn_metrics = agent.learn_step()
-                                if (
-                                    learn_metrics
-                                    and log_cadence > 0
-                                    and agent.grad_steps > 0
-                                    and agent.grad_steps % log_cadence == 0
-                                ):
-                                    learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
-                                    logger.log(learn_log, step=agent.env_steps)
+                        for _ in range(chunk * cfg.replay_ratio):
+                            # Respect shutdown mid-batch. Without this, a
+                            # NaN-triggered shutdown (or user SIGTERM) can
+                            # grind through hundreds more learn_step()
+                            # calls on poisoned weights before the outer
+                            # loop's shutdown check fires, stomping the
+                            # _diverged.pt save with even worse state.
+                            if shutdown_flag["shutdown"]:
+                                break
+                            learn_metrics = agent.learn_step()
+                            if (
+                                learn_metrics
+                                and log_cadence > 0
+                                and agent.grad_steps > 0
+                                and agent.grad_steps % log_cadence == 0
+                            ):
+                                learn_log = {f"learn/{k}": v for k, v in learn_metrics.items()}
+                                logger.log(learn_log, step=agent.env_steps)
+                        # Refresh actor_net weights once per chunk. Cheap
+                        # (~1 ms load_state_dict) and gives rollouts the
+                        # latest policy at chunk granularity rather than at
+                        # learn-step granularity, which would multiply the
+                        # sync cost by MAX_LEARN_PER_ITER.
+                        agent.sync_actor()
                         last_learn_env_steps += chunk
 
                 # Warmup-progress log (throttled).
@@ -1721,9 +1875,8 @@ def _train_vector(
                     )
                     last_warmup_log_env_steps = current_env_steps
 
-                # Checkpoint cadence.
-                with agent_lock:
-                    grad_steps_now = agent.grad_steps
+                # Checkpoint cadence. grad_steps read is atomic (GIL).
+                grad_steps_now = agent.grad_steps
                 if (
                     grad_steps_now > 0
                     and cfg.checkpoint_every_grad_steps > 0
@@ -1731,7 +1884,13 @@ def _train_vector(
                     and grad_steps_now != last_ckpt_grad_steps
                 ):
                     ckpt_path = Path(cfg.log_dir) / f"{run_name}_grad{grad_steps_now}.pt"
-                    with agent_lock:
+                    # _save_checkpoint serializes both replay state and
+                    # sampler state; hold _sampler_lock and _replay_lock so
+                    # neither can be mid-mutation during the save. Order:
+                    # sampler (outer) → replay (inner). Acquired the same
+                    # way at the final-save site below; no other path takes
+                    # these two together, so no AB-BA deadlock.
+                    with agent._sampler_lock, agent._replay_lock:
                         _save_checkpoint(agent, cfg, ckpt_path)
                     _prune_old_checkpoints(
                         Path(cfg.log_dir), run_name, cfg.keep_last_n_checkpoints,
@@ -1751,7 +1910,7 @@ def _train_vector(
 
                 # Hot-add tracks that the user records while training is live.
                 if time.time() - last_savestate_poll_time >= _SAVESTATE_POLL_INTERVAL_S:
-                    with agent_lock:
+                    with agent._sampler_lock:
                         added = _poll_new_tracks(agent, cfg, blacklisted_tracks)
                     if added:
                         log.info(
@@ -1784,7 +1943,7 @@ def _train_vector(
         suffix = "_diverged" if aborted_due_to_divergence else "_final"
         try:
             final_path = Path(cfg.log_dir) / f"{run_name}{suffix}.pt"
-            with agent_lock:
+            with agent._sampler_lock, agent._replay_lock:
                 _save_checkpoint(agent, cfg, final_path, save_replay=True)
         except Exception:  # noqa: BLE001
             log.exception("failed to save final checkpoint")

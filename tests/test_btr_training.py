@@ -1290,17 +1290,22 @@ class TestDeterministicAct:
 
     def test_deterministic_does_not_reset_noise(self, tmp_path: Path) -> None:
         """After disable_noise(), a deterministic act() leaves ε at zero;
-        a non-deterministic one re-samples and ε becomes non-zero."""
+        a non-deterministic one re-samples and ε becomes non-zero.
+
+        act() forwards through ``actor_net`` (the periodically-synced
+        snapshot) since the 2026-05-16 lock-split refactor, so the noise
+        bookkeeping under test lives on actor_net, not online_net.
+        """
         from mkw_rl.rl.networks import FactorizedNoisyLinear
         from mkw_rl.rl.train import BTRAgent
 
         cfg = _tiny_cfg(tmp_path)
         agent = BTRAgent.build(cfg)
-        agent.online_net.disable_noise()
+        agent.actor_net.disable_noise()
 
         # Find the first noisy layer and confirm it starts at ε=0 after disable.
         noisy_layers = [
-            m for m in agent.online_net.modules() if isinstance(m, FactorizedNoisyLinear)
+            m for m in agent.actor_net.modules() if isinstance(m, FactorizedNoisyLinear)
         ]
         assert noisy_layers, "test assumes BTR model has noisy linears"
         layer = noisy_layers[0]
@@ -1319,6 +1324,56 @@ class TestDeterministicAct:
         agent.act(frames, hidden=None)
         assert torch.any(layer.weight_epsilon != 0), (
             "default act() should call reset_noise() which samples non-zero ε"
+        )
+
+    def test_eval_script_disables_noise_on_actor_net(self, tmp_path: Path) -> None:
+        """Regression: scripts/eval_btr.py disables noise for greedy eval.
+
+        Before the 2026-05-16 fix, eval_btr.py called disable_noise on
+        online_net only, but act() reads from actor_net. After a checkpoint
+        load (which copies non-zero ε into actor_net via sync_actor),
+        deterministic eval was still stochastic. The fix disables noise on
+        BOTH nets; this test ensures the regression doesn't return.
+        """
+        from mkw_rl.rl.networks import FactorizedNoisyLinear
+        from mkw_rl.rl.train import BTRAgent
+
+        cfg = _tiny_cfg(tmp_path)
+        agent = BTRAgent.build(cfg)
+
+        # Simulate post-load state: online_net has non-zero ε (set by some
+        # earlier learn_step.reset_noise()), and sync_actor propagated it
+        # into actor_net.
+        for m in agent.online_net.modules():
+            if isinstance(m, FactorizedNoisyLinear):
+                m.reset_noise()
+        agent.sync_actor()
+        # Sanity check the setup: at least one layer has non-zero ε on
+        # both nets.
+        actor_layer = next(
+            m for m in agent.actor_net.modules() if isinstance(m, FactorizedNoisyLinear)
+        )
+        assert torch.any(actor_layer.weight_epsilon != 0), (
+            "test fixture broken: actor_net.ε should be non-zero post-sync"
+        )
+
+        # Replicate eval_btr.py:137-141 — must zero ε on BOTH nets.
+        agent.actor_net.disable_noise()
+        agent.actor_net.train(False)
+        agent.online_net.disable_noise()
+        agent.online_net.train(False)
+
+        assert torch.all(actor_layer.weight_epsilon == 0), (
+            "eval setup must zero actor_net ε so deterministic act() is greedy"
+        )
+
+        # And confirm a deterministic act() leaves it zeroed.
+        frames = torch.zeros(
+            1, 1, cfg.stack_size, cfg.imagey, cfg.imagex, dtype=torch.uint8
+        )
+        agent.act(frames, hidden=None, deterministic=True)
+        assert torch.all(actor_layer.weight_epsilon == 0), (
+            "deterministic act() must not re-introduce noise after disable_noise"
         )
 
     def test_run_one_episode_passes_deterministic_flag(self, tmp_path: Path) -> None:
