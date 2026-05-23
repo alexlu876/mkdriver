@@ -4,6 +4,7 @@ data/processed/
 
 # Savestates — ~24 MB each, reproducible via scripts/record_savestates.py
 data/savestates/*.sav
+data/savestates/_legacy/
 data/savestates/tracks_to_record.txt
 
 # Python / uv
